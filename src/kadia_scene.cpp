@@ -16,22 +16,45 @@
 #include <cmath>
 
 namespace {
-const int kDesignWidth = 1280;
-const int kDesignHeight = 720;
+// The HTML mockup uses fixed CSS pixel sizes and only viewport-relative widths.
+// Keep those exact pixel dimensions and render directly at the monitor's native
+// client size instead of drawing a 1280x720 image and upscaling it.
+int gCanvasWidth = 1280;
+int gCanvasHeight = 720;
 
-const QRectF kFrameRect(10.0, 10.0, 1260.0, 700.0);
 const qreal kShellLeft = 54.0;  // frame inset 10 + shell padding 44
 const qreal kShellTop = 38.0;   // frame inset 10 + shell padding 28
 const qreal kShellRight = 54.0; // frame inset 10 + shell padding 44
 const qreal kTopbarHeight = 74.0;
 const qreal kHubLeft = kShellLeft + 74.0;
 const qreal kHubTop = kShellTop + kTopbarHeight + 6.0;
-const qreal kHubWidth = 1075.0; // min(1180px, 84vw) at 1280x720
 const qreal kPanelTotalWidth = 344.0; // 300 content + 44 horizontal padding
 const qreal kPanelRightMargin = 24.0;
-const qreal kPanelX = kHubLeft + kHubWidth - kPanelRightMargin - kPanelTotalWidth;
 const qreal kStripX = kHubLeft;
-const qreal kStripWidth = kPanelX - kStripX - 24.0;
+
+static qreal canvasWidth() { return qMax(320, gCanvasWidth); }
+static qreal canvasHeight() { return qMax(240, gCanvasHeight); }
+static QRectF frameRect()
+{
+    return QRectF(10.0, 10.0, qMax<qreal>(1.0, canvasWidth() - 20.0),
+                  qMax<qreal>(1.0, canvasHeight() - 20.0));
+}
+static qreal hubWidth()
+{
+    return qMin<qreal>(1180.0, canvasWidth() * 0.84);
+}
+static qreal panelX()
+{
+    return kHubLeft + hubWidth() - kPanelRightMargin - kPanelTotalWidth;
+}
+static qreal stripWidth()
+{
+    return qMax<qreal>(260.0, panelX() - kStripX - 24.0);
+}
+static qreal footerCenterY()
+{
+    return canvasHeight() - 60.0;
+}
 
 static QRectF adjustedRect(const QRectF &r, qreal dx1, qreal dy1, qreal dx2, qreal dy2)
 {
@@ -48,7 +71,8 @@ static QColor withAlpha(const QColor &c, int alpha)
 }
 
 KadiaScene::KadiaScene()
-    : m_rng(0x4B414449u)
+    : m_viewportSize(1280, 720)
+    , m_rng(0x4B414449u)
     , m_category(0)
     , m_tile(0)
     , m_previousTile(0)
@@ -111,7 +135,24 @@ KadiaScene::KadiaScene()
 
 QSize KadiaScene::logicalSize() const
 {
-    return QSize(kDesignWidth, kDesignHeight);
+    return QSize(1280, 720);
+}
+
+void KadiaScene::setViewportSize(const QSize &size)
+{
+    const QSize safe(qMax(320, size.width()), qMax(240, size.height()));
+    if (safe == m_viewportSize)
+        return;
+
+    m_viewportSize = safe;
+    gCanvasWidth = safe.width();
+    gCanvasHeight = safe.height();
+    resetStars();
+}
+
+QSize KadiaScene::viewportSize() const
+{
+    return m_viewportSize;
 }
 
 void KadiaScene::update(double dtSeconds)
@@ -130,8 +171,9 @@ void KadiaScene::update(double dtSeconds)
 
 void KadiaScene::render(QImage &target)
 {
-    if (target.size() != logicalSize() || target.format() != QImage::Format_ARGB32_Premultiplied)
-        target = QImage(logicalSize(), QImage::Format_ARGB32_Premultiplied);
+    const QSize targetSize = m_viewportSize.isValid() ? m_viewportSize : logicalSize();
+    if (target.size() != targetSize || target.format() != QImage::Format_ARGB32_Premultiplied)
+        target = QImage(targetSize, QImage::Format_ARGB32_Premultiplied);
 
     target.fill(QColor(0, 0, 0));
     QPainter p(&target);
@@ -244,10 +286,157 @@ QString KadiaScene::selectedTileName() const
     return sections[m_category].tiles[m_tile].label;
 }
 
+bool KadiaScene::hoverAt(const QPointF &point)
+{
+    if (m_library) {
+        const QVector<KadiaGameInfo> &games = kadiaGames();
+        if (games.isEmpty())
+            return false;
+
+        const qreal y = kHubTop + 310.0;
+        const qreal gap = 15.0;
+        const qreal viewportW = stripWidth();
+        const qreal t = easeOutCubic(qMin<qreal>(1.0, m_gameChangeAge / 0.18));
+
+        QVector<qreal> widths;
+        QVector<qreal> selections;
+        widths.reserve(games.size());
+        selections.reserve(games.size());
+        for (int i = 0; i < games.size(); ++i) {
+            qreal sel = 0.0;
+            if (m_game == m_previousGame)
+                sel = i == m_game ? 1.0 : 0.0;
+            else if (i == m_game)
+                sel = t;
+            else if (i == m_previousGame)
+                sel = 1.0 - t;
+            selections.push_back(sel);
+            widths.push_back(113.0 + (148.0 - 113.0) * sel);
+        }
+
+        qreal raw = 0.0;
+        qreal selectedCenter = 0.0;
+        for (int i = 0; i < games.size(); ++i) {
+            if (i == m_game)
+                selectedCenter = raw + widths[i] * 0.5;
+            raw += widths[i] + gap;
+        }
+        const qreal totalW = qMax<qreal>(0.0, raw - gap);
+        const qreal preferred = qMin(viewportW * 0.56, 530.0);
+        const qreal scroll = qBound<qreal>(0.0, selectedCenter - preferred,
+                                          qMax<qreal>(0.0, totalW - viewportW));
+
+        qreal x = kStripX - scroll;
+        for (int i = 0; i < games.size(); ++i) {
+            const qreal h = 160.0 + (210.0 - 160.0) * selections[i];
+            const qreal lift = -10.0 * selections[i];
+            const QRectF card(x, y + lift, widths[i], h);
+            if (card.contains(point)) {
+                if (m_game != i) {
+                    m_previousGame = m_game;
+                    m_game = i;
+                    m_gameChangeAge = 0.0;
+                }
+                return true;
+            }
+            x += widths[i] + gap;
+        }
+        return false;
+    }
+
+    const QVector<KadiaSectionInfo> &sections = kadiaSections();
+    if (sections.isEmpty())
+        return false;
+
+    // Category rail hit testing mirrors drawCategoryRail().
+    const int offsets[] = { -2, -1, 0, 1, 2, 3 };
+    const qreal yPositions[] = { 0.0, 34.0, 68.0, 120.0, 154.0, 188.0 };
+    const qreal railTop = kHubTop + 56.0;
+    for (int pos = 0; pos < 6; ++pos) {
+        const int index = m_category + offsets[pos];
+        if (index < 0 || index >= sections.size())
+            continue;
+        const qreal h = offsets[pos] == 0 ? 52.0 : 34.0;
+        const QRectF r(kHubLeft, railTop + yPositions[pos], 430.0, h);
+        if (r.contains(point)) {
+            if (index != m_category) {
+                m_category = index;
+                m_previousTile = 0;
+                m_tile = 0;
+                m_categoryChangeAge = 0.0;
+                m_tileChangeAge = 0.0;
+            }
+            return true;
+        }
+    }
+
+    if (m_category < 0 || m_category >= sections.size())
+        return false;
+    const KadiaSectionInfo &section = sections[m_category];
+    if (section.tiles.isEmpty())
+        return false;
+
+    const qreal stripY = kHubTop + 318.0;
+    const QVector<TileGeometry> geoms = tileGeometries(section.tiles.size(), m_tile, m_previousTile,
+                                                       m_tileChangeAge, kStripX, stripY, stripWidth());
+    for (int i = 0; i < geoms.size(); ++i) {
+        if (geoms[i].rect.contains(point)) {
+            if (m_tile != i) {
+                m_previousTile = m_tile;
+                m_tile = i;
+                m_tileChangeAge = 0.0;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool KadiaScene::clickAt(const QPointF &point)
+{
+    if (!hoverAt(point))
+        return false;
+
+    if (!m_library) {
+        // A mouse click on the tile row behaves like A/Enter. Category clicks
+        // only change the active vertical section.
+        const qreal stripTop = kHubTop + 286.0;
+        const qreal stripBottom = kHubTop + 492.0;
+        if (point.y() >= stripTop && point.y() <= stripBottom)
+            handle(Accept);
+    }
+    return true;
+}
+
+bool KadiaScene::doubleClickAt(const QPointF &point)
+{
+    // Single-click already activates top-level tiles after hover selection.
+    // Keep double-click accepted without firing the action twice.
+    return hoverAt(point);
+}
+
+void KadiaScene::wheelAt(const QPointF &point, int delta)
+{
+    if (delta == 0)
+        return;
+
+    if (m_library) {
+        handle(delta > 0 ? MoveLeft : MoveRight);
+        return;
+    }
+
+    const qreal stripTop = kHubTop + 285.0;
+    const qreal stripBottom = kHubTop + 510.0;
+    if (point.y() >= stripTop && point.y() <= stripBottom)
+        handle(delta > 0 ? MoveLeft : MoveRight);
+    else
+        handle(delta > 0 ? MoveUp : MoveDown);
+}
+
 void KadiaScene::resetStars()
 {
     m_stars.clear();
-    const int count = 230;
+    const int count = qBound(230, static_cast<int>((canvasWidth() * canvasHeight()) / 5200.0), 720);
     m_stars.reserve(count);
     for (int i = 0; i < count; ++i)
         m_stars.push_back(makeStar(true));
@@ -257,10 +446,11 @@ KadiaScene::Star KadiaScene::makeStar(bool randomDepth)
 {
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     Star s;
-    s.x = (unit(m_rng) - 0.5f) * static_cast<float>(kDesignWidth) * 1.55f;
-    s.y = (unit(m_rng) - 0.5f) * static_cast<float>(kDesignHeight) * 1.55f;
-    s.z = randomDepth ? 55.0f + unit(m_rng) * (static_cast<float>(kDesignWidth) - 55.0f)
-                      : static_cast<float>(kDesignWidth);
+    s.x = (unit(m_rng) - 0.5f) * static_cast<float>(canvasWidth()) * 1.55f;
+    s.y = (unit(m_rng) - 0.5f) * static_cast<float>(canvasHeight()) * 1.55f;
+    const float nearPlane = 110.0f;
+    s.z = randomDepth ? nearPlane + unit(m_rng) * (static_cast<float>(canvasWidth()) - nearPlane)
+                      : static_cast<float>(canvasWidth());
     s.previousZ = s.z;
     s.warmth = unit(m_rng);
     return s;
@@ -268,12 +458,12 @@ KadiaScene::Star KadiaScene::makeStar(bool randomDepth)
 
 void KadiaScene::updateStars(double dtSeconds)
 {
-    const float delta = static_cast<float>(1.55 * dtSeconds * 60.0);
+    const float delta = static_cast<float>(0.95 * dtSeconds * 60.0);
     for (int i = 0; i < m_stars.size(); ++i) {
         Star &s = m_stars[i];
         s.previousZ = s.z;
         s.z -= delta;
-        if (s.z <= 8.0f)
+        if (s.z <= 28.0f)
             s = makeStar(false);
     }
 }
@@ -281,17 +471,17 @@ void KadiaScene::updateStars(double dtSeconds)
 void KadiaScene::drawFrame(QPainter &p)
 {
     QPainterPath framePath;
-    framePath.addRoundedRect(kFrameRect, 16.0, 16.0);
+    framePath.addRoundedRect(frameRect(), 16.0, 16.0);
 
     p.save();
     p.setClipPath(framePath);
 
-    QLinearGradient base(kFrameRect.topLeft(), kFrameRect.bottomRight());
+    QLinearGradient base(frameRect().topLeft(), frameRect().bottomRight());
     base.setColorAt(0.0, QColor(1, 2, 7));
     base.setColorAt(0.40, QColor(4, 7, 14));
     base.setColorAt(0.74, QColor(9, 13, 21));
     base.setColorAt(1.0, QColor(5, 7, 13));
-    p.fillRect(kFrameRect, base);
+    p.fillRect(frameRect(), base);
 
     drawVistaBackground(p);
     drawStarfield(p);
@@ -307,7 +497,7 @@ void KadiaScene::drawFrame(QPainter &p)
     p.save();
     p.setPen(QPen(QColor(255, 248, 231, 26), 1.0));
     p.setBrush(Qt::NoBrush);
-    p.drawRoundedRect(kFrameRect, 16.0, 16.0);
+    p.drawRoundedRect(frameRect(), 16.0, 16.0);
     p.restore();
 }
 
@@ -317,8 +507,8 @@ void KadiaScene::drawVistaBackground(QPainter &p)
     // reference HTML. The original CSS uses border-top on huge transformed
     // ellipses; here the same percentages, rotations, skew and slow alternate
     // motion are rendered as transformed D3D-presented QPainter arcs.
-    const qreal W = kDesignWidth;
-    const qreal H = kDesignHeight;
+    const qreal W = canvasWidth();
+    const qreal H = canvasHeight();
 
     const qreal hazeT = 0.5 + 0.5 * qSin(m_time * (2.0 * 3.14159265358979323846 / 36.0));
     const qreal hazeDx = (-0.012 + (0.016 + 0.012) * hazeT) * W;
@@ -463,8 +653,8 @@ void KadiaScene::drawVistaBackground(QPainter &p)
 
 void KadiaScene::drawStarfield(QPainter &p)
 {
-    const qreal cx = kDesignWidth * 0.5;
-    const qreal cy = kDesignHeight * 0.5;
+    const qreal cx = canvasWidth() * 0.5;
+    const qreal cy = canvasHeight() * 0.5;
     const qreal focal = 205.0;
 
     p.save();
@@ -472,7 +662,7 @@ void KadiaScene::drawStarfield(QPainter &p)
 
     for (int i = 0; i < m_stars.size(); ++i) {
         Star &s = m_stars[i];
-        if (s.z <= 8.0f || s.previousZ <= 0.0f)
+        if (s.z <= 28.0f || s.previousZ <= 0.0f)
             continue;
 
         const qreal sx = (s.x / s.z) * focal + cx;
@@ -480,24 +670,33 @@ void KadiaScene::drawStarfield(QPainter &p)
         const qreal px = (s.x / s.previousZ) * focal + cx;
         const qreal py = (s.y / s.previousZ) * focal + cy;
 
-        if (sx < -50.0 || sx > kDesignWidth + 50.0 ||
-            sy < -50.0 || sy > kDesignHeight + 50.0) {
+        if (!std::isfinite(static_cast<double>(sx)) || !std::isfinite(static_cast<double>(sy)) ||
+            !std::isfinite(static_cast<double>(px)) || !std::isfinite(static_cast<double>(py)) ||
+            sx < -40.0 || sx > canvasWidth() + 40.0 ||
+            sy < -40.0 || sy > canvasHeight() + 40.0) {
             s = makeStar(false);
             continue;
         }
 
-        const qreal depth = qBound<qreal>(0.0, 1.0 - s.z / kDesignWidth, 1.0);
-        const qreal radius = 0.72 + depth * 2.05;
-        const int alpha = qBound(0, static_cast<int>((0.55 + depth * 0.45) * 255.0), 255);
+        const qreal depth = qBound<qreal>(0.0, 1.0 - s.z / canvasWidth(), 1.0);
+        const qreal radius = 0.50 + depth * 1.45;
+        const int alpha = qBound(0, static_cast<int>((0.48 + depth * 0.46) * 255.0), 255);
 
-        if (depth > 0.14) {
-            const qreal trailScale = 2.0 + depth * 8.0;
-            const qreal dx = sx - px;
-            const qreal dy = sy - py;
-            const QPointF trailStart(sx - dx * trailScale, sy - dy * trailScale);
+        // Windows 98-style streaks, but clamp their physical length. The old
+        // code extrapolated by up to 10x and could create full-screen lines
+        // when a star was close to the camera.
+        const qreal dx = sx - px;
+        const qreal dy = sy - py;
+        const qreal motion = qSqrt(dx * dx + dy * dy);
+        if (depth > 0.14 && motion > 0.02) {
+            const qreal maxTrail = 6.0 + depth * 30.0;
+            const qreal trailLength = qMin(maxTrail, motion * (2.4 + depth * 1.6));
+            const qreal inv = 1.0 / motion;
+            const QPointF trailStart(sx - dx * inv * trailLength,
+                                     sy - dy * inv * trailLength);
             p.setPen(QPen(QColor(255, 248, 231,
-                                 qMin(235, static_cast<int>((0.24 + depth * 0.68) * 255.0))),
-                          0.65 + depth * 1.55, Qt::SolidLine, Qt::RoundCap));
+                                 qMin(215, static_cast<int>((0.18 + depth * 0.58) * 255.0))),
+                          0.48 + depth * 1.05, Qt::SolidLine, Qt::RoundCap));
             p.drawLine(trailStart, QPointF(sx, sy));
         }
 
@@ -507,13 +706,13 @@ void KadiaScene::drawStarfield(QPainter &p)
         p.setBrush(starColor);
         p.drawEllipse(QPointF(sx, sy), radius, radius);
 
-        if (depth > 0.72) {
-            QRadialGradient halo(QPointF(sx, sy), radius * 4.2);
-            halo.setColorAt(0.0, QColor(255, 248, 231, 68));
-            halo.setColorAt(0.35, QColor(255, 239, 205, 25));
+        if (depth > 0.78) {
+            QRadialGradient halo(QPointF(sx, sy), radius * 3.1);
+            halo.setColorAt(0.0, QColor(255, 248, 231, 48));
+            halo.setColorAt(0.40, QColor(255, 239, 205, 16));
             halo.setColorAt(1.0, QColor(255, 248, 231, 0));
             p.setBrush(halo);
-            p.drawEllipse(QPointF(sx, sy), radius * 4.2, radius * 4.2);
+            p.drawEllipse(QPointF(sx, sy), radius * 3.1, radius * 3.1);
         }
     }
     p.restore();
@@ -522,18 +721,19 @@ void KadiaScene::drawStarfield(QPainter &p)
 void KadiaScene::drawVignette(QPainter &p)
 {
     p.save();
-    QRadialGradient radial(QPointF(kDesignWidth * 0.5, kDesignHeight * 0.5), 760.0);
+    QRadialGradient radial(QPointF(canvasWidth() * 0.5, canvasHeight() * 0.5),
+                            qMax(canvasWidth(), canvasHeight()) * 0.62);
     radial.setColorAt(0.0, QColor(0, 0, 0, 0));
     radial.setColorAt(0.72, QColor(0, 0, 0, 4));
     radial.setColorAt(1.0, QColor(0, 0, 0, 36));
-    p.fillRect(kFrameRect, radial);
+    p.fillRect(frameRect(), radial);
 
-    QLinearGradient lr(kFrameRect.left(), 0.0, kFrameRect.right(), 0.0);
+    QLinearGradient lr(frameRect().left(), 0.0, frameRect().right(), 0.0);
     lr.setColorAt(0.0, QColor(0, 0, 0, 32));
     lr.setColorAt(0.10, QColor(0, 0, 0, 0));
     lr.setColorAt(0.86, QColor(0, 0, 0, 0));
     lr.setColorAt(1.0, QColor(0, 0, 0, 25));
-    p.fillRect(kFrameRect, lr);
+    p.fillRect(frameRect(), lr);
     p.restore();
 }
 
@@ -545,7 +745,7 @@ void KadiaScene::drawTopBar(QPainter &p)
     p.setFont(fontForPixelSize(12, QFont::Normal));
     p.setPen(QColor(255, 248, 231, 185));
     const QString timeText = QDateTime::currentDateTime().toString(QStringLiteral("h:mm AP"));
-    p.drawText(QRectF(kDesignWidth - kShellRight - 150.0, kShellTop + 8.0, 150.0, 28.0),
+    p.drawText(QRectF(canvasWidth() - kShellRight - 150.0, kShellTop + 8.0, 150.0, 28.0),
                Qt::AlignRight | Qt::AlignVCenter, timeText);
     p.restore();
 }
@@ -648,11 +848,11 @@ void KadiaScene::drawHome(QPainter &p)
 
     const qreal stripY = kHubTop + 318.0;
     const QVector<TileGeometry> geoms = tileGeometries(section.tiles.size(), m_tile, m_previousTile,
-                                                       m_tileChangeAge, kStripX, stripY, kStripWidth);
+                                                       m_tileChangeAge, kStripX, stripY, stripWidth());
     p.save();
-    p.setClipRect(QRectF(kStripX, stripY - 18.0, kStripWidth, 178.0));
+    p.setClipRect(QRectF(kStripX, stripY - 18.0, stripWidth(), 178.0));
     for (int i = 0; i < geoms.size(); ++i) {
-        if (geoms[i].rect.right() < kStripX - 8.0 || geoms[i].rect.left() > kStripX + kStripWidth + 8.0)
+        if (geoms[i].rect.right() < kStripX - 8.0 || geoms[i].rect.left() > kStripX + stripWidth() + 8.0)
             continue;
         const qreal delay = qMin(i, 5) * 0.025;
         const qreal enterT = easeOutCubic(qBound<qreal>(0.0, (m_categoryChangeAge - delay) / 0.34, 1.0));
@@ -672,12 +872,12 @@ void KadiaScene::drawHome(QPainter &p)
     p.save();
     p.setFont(fontForPixelSize(14, QFont::Normal));
     p.setPen(QColor(255, 248, 231, 158));
-    p.drawText(QRectF(kStripX, stripY + 164.0, kStripWidth, 24.0),
+    p.drawText(QRectF(kStripX, stripY + 164.0, stripWidth(), 24.0),
                Qt::AlignLeft | Qt::AlignVCenter, section.caption);
     p.restore();
 
     const KadiaTileInfo &info = section.tiles[qBound(0, m_tile, section.tiles.size() - 1)];
-    const QRectF panel(kPanelX, kHubTop + 308.0, kPanelTotalWidth, 176.0 + 40.0);
+    const QRectF panel(panelX(), kHubTop + 308.0, kPanelTotalWidth, 176.0 + 40.0);
     drawDescriptionPanel(p, panel, info.title, section.name, info.description, false);
 }
 
@@ -708,7 +908,7 @@ void KadiaScene::drawLibrary(QPainter &p)
     const QVector<KadiaGameInfo> &games = kadiaGames();
     const qreal y = kHubTop + 310.0;
     const qreal gap = 15.0;
-    const qreal viewportW = kStripWidth;
+    const qreal viewportW = stripWidth();
     const qreal t = easeOutCubic(qMin<qreal>(1.0, m_gameChangeAge / 0.18));
 
     QVector<qreal> widths;
@@ -758,16 +958,16 @@ void KadiaScene::drawLibrary(QPainter &p)
 
     if (!games.isEmpty()) {
         const KadiaGameInfo &game = games[qBound(0, m_game, games.size() - 1)];
-        const QRectF panel(kPanelX, kHubTop + 302.0, kPanelTotalWidth, 204.0);
+        const QRectF panel(panelX(), kHubTop + 302.0, kPanelTotalWidth, 204.0);
         drawDescriptionPanel(p, panel, game.title, game.subtitle, game.description, true);
     }
 }
 
 void KadiaScene::drawFooter(QPainter &p)
 {
-    const qreal footerCenterY = 660.0; // frame + shell bottom padding + 52px footer
-    drawControllerHints(p, kShellLeft, footerCenterY);
-    drawMediaControls(p, kDesignWidth - kShellRight, footerCenterY);
+    const qreal cy = footerCenterY();
+    drawControllerHints(p, kShellLeft, cy);
+    drawMediaControls(p, canvasWidth() - kShellRight, cy);
 }
 
 void KadiaScene::drawCategoryRail(QPainter &p)
@@ -882,10 +1082,8 @@ void KadiaScene::drawTile(QPainter &p, const QRectF &rect, float selection,
                      rect.width() * 0.24, rect.height() * 0.28,
                      QColor(255, 240, 200, 34), QColor(255, 255, 255, 0));
 
-    p.setFont(fontForPixelSize(static_cast<int>(38.0 + 8.0 * selection), QFont::Normal, symbolFontFamily()));
-    p.setPen(QColor(255, 248, 231, 210));
-    p.drawText(QRectF(rect.left(), rect.top() + 4.0, rect.width(), rect.height() - 30.0),
-               Qt::AlignCenter, icon);
+    drawTileIcon(p, QRectF(rect.left(), rect.top() + 4.0, rect.width(), rect.height() - 30.0),
+                 icon, label, selection);
 
     const qreal labelH = 31.0 + 7.0 * selection;
     QLinearGradient labelBg(rect.left(), rect.bottom() - labelH, rect.left(), rect.bottom());
@@ -906,6 +1104,246 @@ void KadiaScene::drawTile(QPainter &p, const QRectF &rect, float selection,
         p.setBrush(Qt::NoBrush);
         p.setPen(QPen(QColor(255, 248, 231, static_cast<int>(45 + 100 * selection)), 1.0));
         p.drawRoundedRect(adjustedRect(rect, -1.0, -1.0, 1.0, 1.0), 3.0, 3.0);
+    }
+    p.restore();
+}
+
+void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &icon,
+                              const QString &label, float selection)
+{
+    Q_UNUSED(icon);
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    const QColor c(255, 248, 231, 215);
+    const qreal pi = 3.14159265358979323846;
+    const QPointF center = rect.center();
+    const qreal scale = 1.0 + 0.08 * selection;
+    const qreal base = qMin(rect.width(), rect.height()) * 0.20 * scale;
+    const QString key = label.toLower();
+
+    auto linePen = [&](qreal width) {
+        return QPen(c, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    };
+
+    auto drawDiamond = [&](bool filled) {
+        QPainterPath path;
+        path.moveTo(center.x(), center.y() - base);
+        path.lineTo(center.x() + base, center.y());
+        path.lineTo(center.x(), center.y() + base);
+        path.lineTo(center.x() - base, center.y());
+        path.closeSubpath();
+        if (filled) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(c);
+        } else {
+            p.setPen(linePen(2.0));
+            p.setBrush(Qt::NoBrush);
+        }
+        p.drawPath(path);
+    };
+
+    auto drawStar = [&](bool filled) {
+        QPainterPath path;
+        const int points = 8;
+        for (int i = 0; i < points; ++i) {
+            const qreal a = -pi * 0.5 + i * pi / 4.0;
+            const qreal r = (i % 2 == 0) ? base : base * 0.42;
+            const QPointF pt(center.x() + qCos(a) * r, center.y() + qSin(a) * r);
+            if (i == 0) path.moveTo(pt); else path.lineTo(pt);
+        }
+        path.closeSubpath();
+        if (filled) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(c);
+        } else {
+            p.setPen(linePen(1.8));
+            p.setBrush(Qt::NoBrush);
+        }
+        p.drawPath(path);
+    };
+
+    auto drawGrid = [&]() {
+        p.setPen(Qt::NoPen);
+        p.setBrush(c);
+        const qreal cell = base * 0.42;
+        const qreal gap = base * 0.20;
+        const qreal total = cell * 3.0 + gap * 2.0;
+        const qreal x0 = center.x() - total * 0.5;
+        const qreal y0 = center.y() - total * 0.5;
+        for (int y = 0; y < 3; ++y)
+            for (int x = 0; x < 3; ++x)
+                p.drawRoundedRect(QRectF(x0 + x * (cell + gap), y0 + y * (cell + gap), cell, cell), 1.2, 1.2);
+    };
+
+    auto drawSearch = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(2.4));
+        const qreal r = base * 0.68;
+        p.drawEllipse(QPointF(center.x() - base * 0.18, center.y() - base * 0.12), r, r);
+        p.drawLine(QPointF(center.x() + base * 0.30, center.y() + base * 0.36),
+                   QPointF(center.x() + base * 0.92, center.y() + base * 0.98));
+    };
+
+    auto drawPlay = [&]() {
+        QPainterPath path;
+        path.moveTo(center.x() - base * 0.58, center.y() - base);
+        path.lineTo(center.x() + base, center.y());
+        path.lineTo(center.x() - base * 0.58, center.y() + base);
+        path.closeSubpath();
+        p.fillPath(path, c);
+    };
+
+    auto drawScreen = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(2.0));
+        QRectF screen(center.x() - base, center.y() - base * 0.68, base * 2.0, base * 1.36);
+        p.drawRoundedRect(screen, 2.0, 2.0);
+        p.drawLine(QPointF(center.x() - base * 0.30, screen.bottom() + base * 0.30),
+                   QPointF(center.x() + base * 0.30, screen.bottom() + base * 0.30));
+        p.drawLine(QPointF(center.x(), screen.bottom()), QPointF(center.x(), screen.bottom() + base * 0.30));
+    };
+
+    auto drawMusic = [&]() {
+        p.setPen(linePen(2.2));
+        p.setBrush(c);
+        const qreal stemX = center.x() + base * 0.38;
+        p.drawLine(QPointF(stemX, center.y() - base * 0.90), QPointF(stemX, center.y() + base * 0.45));
+        p.drawLine(QPointF(stemX, center.y() - base * 0.90), QPointF(center.x() - base * 0.38, center.y() - base * 0.68));
+        p.drawEllipse(QPointF(center.x() - base * 0.48, center.y() + base * 0.55), base * 0.34, base * 0.26);
+        p.drawEllipse(QPointF(stemX - base * 0.08, center.y() + base * 0.48), base * 0.34, base * 0.26);
+    };
+
+    auto drawList = [&]() {
+        p.setPen(linePen(1.9));
+        for (int i = -1; i <= 1; ++i) {
+            const qreal y = center.y() + i * base * 0.55;
+            p.drawEllipse(QPointF(center.x() - base * 0.82, y), 1.5, 1.5);
+            p.drawLine(QPointF(center.x() - base * 0.48, y), QPointF(center.x() + base * 0.88, y));
+        }
+    };
+
+    auto drawController = [&]() {
+        QPainterPath body;
+        body.moveTo(center.x() - base * 0.95, center.y() + base * 0.62);
+        body.cubicTo(center.x() - base * 1.12, center.y() - base * 0.10,
+                     center.x() - base * 0.72, center.y() - base * 0.62,
+                     center.x() - base * 0.28, center.y() - base * 0.50);
+        body.lineTo(center.x() + base * 0.28, center.y() - base * 0.50);
+        body.cubicTo(center.x() + base * 0.72, center.y() - base * 0.62,
+                     center.x() + base * 1.12, center.y() - base * 0.10,
+                     center.x() + base * 0.95, center.y() + base * 0.62);
+        body.cubicTo(center.x() + base * 0.78, center.y() + base * 0.92,
+                     center.x() + base * 0.50, center.y() + base * 0.64,
+                     center.x() + base * 0.27, center.y() + base * 0.30);
+        body.lineTo(center.x() - base * 0.27, center.y() + base * 0.30);
+        body.cubicTo(center.x() - base * 0.50, center.y() + base * 0.64,
+                     center.x() - base * 0.78, center.y() + base * 0.92,
+                     center.x() - base * 0.95, center.y() + base * 0.62);
+        body.closeSubpath();
+        p.setPen(linePen(1.8));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(body);
+        p.drawLine(QPointF(center.x() - base * 0.55, center.y() - base * 0.10),
+                   QPointF(center.x() - base * 0.17, center.y() - base * 0.10));
+        p.drawLine(QPointF(center.x() - base * 0.36, center.y() - base * 0.29),
+                   QPointF(center.x() - base * 0.36, center.y() + base * 0.09));
+        p.setBrush(c); p.setPen(Qt::NoPen);
+        p.drawEllipse(QPointF(center.x() + base * 0.45, center.y() - base * 0.18), base * 0.11, base * 0.11);
+        p.drawEllipse(QPointF(center.x() + base * 0.68, center.y() + base * 0.02), base * 0.11, base * 0.11);
+    };
+
+    auto drawGear = [&]() {
+        p.setPen(linePen(2.0));
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(center, base * 0.50, base * 0.50);
+        p.drawEllipse(center, base * 0.18, base * 0.18);
+        for (int i = 0; i < 8; ++i) {
+            const qreal a = i * pi / 4.0;
+            p.drawLine(QPointF(center.x() + qCos(a) * base * 0.62, center.y() + qSin(a) * base * 0.62),
+                       QPointF(center.x() + qCos(a) * base * 0.93, center.y() + qSin(a) * base * 0.93));
+        }
+    };
+
+    auto drawPower = [&]() {
+        p.setPen(linePen(2.3));
+        p.setBrush(Qt::NoBrush);
+        p.drawArc(QRectF(center.x() - base, center.y() - base, base * 2, base * 2), 40 * 16, 280 * 16);
+        p.drawLine(QPointF(center.x(), center.y() - base * 1.05), QPointF(center.x(), center.y() - base * 0.15));
+    };
+
+    auto drawRefresh = [&]() {
+        p.setPen(linePen(2.0));
+        p.setBrush(Qt::NoBrush);
+        p.drawArc(QRectF(center.x() - base, center.y() - base, base * 2, base * 2), 25 * 16, 290 * 16);
+        QPainterPath arrow;
+        arrow.moveTo(center.x() + base * 0.92, center.y() - base * 0.32);
+        arrow.lineTo(center.x() + base * 0.92, center.y() + base * 0.20);
+        arrow.lineTo(center.x() + base * 0.45, center.y() - base * 0.02);
+        arrow.closeSubpath();
+        p.fillPath(arrow, c);
+    };
+
+    if (key.contains(QStringLiteral("search"))) {
+        drawSearch();
+    } else if (key.contains(QStringLiteral("music")) || key.contains(QStringLiteral("song")) || key.contains(QStringLiteral("radio"))) {
+        drawMusic();
+    } else if (key.contains(QStringLiteral("favorite")) || key.contains(QStringLiteral("achievement")) || key.contains(QStringLiteral("rating"))) {
+        drawStar(false);
+    } else if (key.contains(QStringLiteral("controller")) || key.contains(QStringLiteral("player")) || key.contains(QStringLiteral("pad"))) {
+        drawController();
+    } else if (key.contains(QStringLiteral("setting")) || key.contains(QStringLiteral("config")) || key.contains(QStringLiteral("driver")) || key.contains(QStringLiteral("setup"))) {
+        drawGear();
+    } else if (key.contains(QStringLiteral("power")) || key.contains(QStringLiteral("shut")) || key.contains(QStringLiteral("sleep")) || key.contains(QStringLiteral("quit")) || key.contains(QStringLiteral("exit"))) {
+        drawPower();
+    } else if (key.contains(QStringLiteral("update")) || key.contains(QStringLiteral("refresh")) || key.contains(QStringLiteral("automatic"))) {
+        drawRefresh();
+    } else if (key.contains(QStringLiteral("video")) || key.contains(QStringLiteral("movie")) || key.contains(QStringLiteral("tv")) || key.contains(QStringLiteral("dvd"))) {
+        drawScreen();
+    } else if (key.contains(QStringLiteral("play")) || key.contains(QStringLiteral("continue"))) {
+        drawPlay();
+    } else if (key.contains(QStringLiteral("picture")) || key.contains(QStringLiteral("screenshot")) || key.contains(QStringLiteral("fanart")) || key.contains(QStringLiteral("box art"))) {
+        drawScreen();
+    } else if (key.contains(QStringLiteral("guide")) || key.contains(QStringLiteral("playlist")) || key.contains(QStringLiteral("list")) || key.contains(QStringLiteral("filter")) || key.contains(QStringLiteral("sort"))) {
+        drawList();
+    } else if (key == QStringLiteral("nintendo")) {
+        drawDiamond(true);
+    } else if (key == QStringLiteral("super nintendo")) {
+        drawStar(true);
+    } else if (key == QStringLiteral("sega")) {
+        p.setBrush(Qt::NoBrush); p.setPen(linePen(2.2));
+        p.drawEllipse(center, base, base); p.drawEllipse(center, base * 0.52, base * 0.52);
+    } else if (key == QStringLiteral("playstation") || key.contains(QStringLiteral("epic"))) {
+        drawDiamond(false);
+    } else if (key.contains(QStringLiteral("xbox")) || key.contains(QStringLiteral("windows"))) {
+        p.setPen(linePen(1.8)); p.setBrush(Qt::NoBrush);
+        const qreal b = base * 0.82;
+        p.drawRect(QRectF(center.x()-b, center.y()-b, b*2, b*2));
+        p.drawLine(QPointF(center.x(), center.y()-b), QPointF(center.x(), center.y()+b));
+        p.drawLine(QPointF(center.x()-b, center.y()), QPointF(center.x()+b, center.y()));
+    } else if (key.contains(QStringLiteral("atari"))) {
+        p.setPen(linePen(2.0)); p.setBrush(Qt::NoBrush);
+        QPainterPath tri; tri.moveTo(center.x(),center.y()-base); tri.lineTo(center.x()+base,center.y()+base*0.85); tri.lineTo(center.x()-base,center.y()+base*0.85); tri.closeSubpath();
+        p.drawPath(tri);
+    } else if (key.contains(QStringLiteral("nec"))) {
+        p.setPen(linePen(2.0)); p.setBrush(Qt::NoBrush); p.drawEllipse(center,base,base);
+        p.setBrush(c); p.setPen(Qt::NoPen); p.drawEllipse(center,base*0.18,base*0.18);
+    } else if (key.contains(QStringLiteral("game boy")) || key.contains(QStringLiteral("psp")) || key.contains(QStringLiteral("vita")) || key.contains(QStringLiteral("handheld"))) {
+        p.setPen(linePen(2.0)); p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(QRectF(center.x()-base*1.05, center.y()-base*0.62, base*2.10, base*1.24), base*0.18, base*0.18);
+        p.setBrush(c); p.setPen(Qt::NoPen);
+        p.drawEllipse(QPointF(center.x()+base*0.58,center.y()),base*0.10,base*0.10);
+    } else if (key.contains(QStringLiteral("all games")) || key.contains(QStringLiteral("library")) || key.contains(QStringLiteral("system")) || key.contains(QStringLiteral("collection")) || key.contains(QStringLiteral("scrape")) || key.contains(QStringLiteral("content"))) {
+        drawGrid();
+    } else {
+        // Deterministic geometric fallback. Never render the raw Unicode icon
+        // string, so an XP compiler/codepage mismatch can no longer turn icons
+        // into mojibake such as "mojibake glyphs".
+        const uint h = qHash(label);
+        if ((h & 3u) == 0u) drawDiamond(false);
+        else if ((h & 3u) == 1u) drawStar(false);
+        else if ((h & 3u) == 2u) drawGrid();
+        else { p.setBrush(Qt::NoBrush); p.setPen(linePen(2.0)); p.drawEllipse(center, base, base); }
     }
     p.restore();
 }
@@ -938,7 +1376,7 @@ void KadiaScene::drawDescriptionPanel(QPainter &p, const QRectF &rect,
         p.drawLine(QPointF(x, lineY), QPointF(rect.right() - 22.0, lineY));
         p.setPen(QColor(255, 248, 231, 200));
         p.drawText(QRectF(x, lineY + 8.0, width, 24.0), Qt::AlignLeft | Qt::AlignVCenter,
-                   QStringLiteral("Enter / A = Play · Esc / B = Back"));
+                   QStringLiteral("Enter / A = Play  |  Esc / B = Back"));
     }
     p.restore();
 }
@@ -1111,8 +1549,9 @@ void KadiaScene::drawMediaControls(QPainter &p, qreal right, qreal centerY)
     // Status text to the far right, matching the HTML footer.
     p.setFont(fontForPixelSize(11, QFont::Normal));
     p.setPen(QColor(255,248,231,115));
-    const QString status = QStringLiteral("%1  Keyboard enabled  1080p")
-        .arg(m_controllerConnected ? QStringLiteral("Controller connected") : QStringLiteral("Controller disconnected"));
+    const QString status = QStringLiteral("Controller %1  Keyboard  %2x%3")
+        .arg(m_controllerConnected ? QStringLiteral("on") : QStringLiteral("off"))
+        .arg(static_cast<int>(canvasWidth())).arg(static_cast<int>(canvasHeight()));
     const QRectF statusRect(right - statusWidth, centerY - 9.0, statusWidth, 18.0);
     p.drawText(statusRect, Qt::AlignRight | Qt::AlignVCenter, status);
     p.restore();
@@ -1128,8 +1567,8 @@ void KadiaScene::drawControllerHints(QPainter &p, qreal x, qreal centerY)
     const Hint hints[] = {
         { QStringLiteral("A"), QStringLiteral("Select") },
         { QStringLiteral("B"), QStringLiteral("Back") },
-        { QStringLiteral("↔"), QStringLiteral("Browse") },
-        { QStringLiteral("▲▼"), QStringLiteral("Sections") }
+        { QStringLiteral("LR"), QStringLiteral("Browse") },
+        { QStringLiteral("UD"), QStringLiteral("Sections") }
     };
 
     qreal cursor = x;

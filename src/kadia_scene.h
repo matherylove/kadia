@@ -27,6 +27,8 @@ public:
     KadiaScene();
 
     QSize logicalSize() const;
+    void setViewportSize(const QSize &size);
+    QSize viewportSize() const;
     void update(double dtSeconds);
     void render(QImage &target);
     void handle(Action action);
@@ -36,6 +38,13 @@ public:
     bool inLibrary() const;
     QString selectedSectionName() const;
     QString selectedTileName() const;
+
+    // Native mouse support. Coordinates are client pixels because the scene
+    // renders at the monitor's actual resolution (no 720p intermediate).
+    bool hoverAt(const QPointF &point);
+    bool clickAt(const QPointF &point);
+    bool doubleClickAt(const QPointF &point);
+    void wheelAt(const QPointF &point, int delta);
 
 private:
     struct Star {
@@ -71,6 +80,8 @@ private:
                                          qreal viewportWidth) const;
     void drawTile(QPainter &p, const QRectF &rect, float selection,
                   const QString &icon, const QString &label, int index);
+    void drawTileIcon(QPainter &p, const QRectF &rect, const QString &icon,
+                      const QString &label, float selection);
     void drawDescriptionPanel(QPainter &p, const QRectF &rect,
                               const QString &title, const QString &sub,
                               const QString &description, bool withPlayHint = false);
@@ -90,6 +101,7 @@ private:
     static qreal easeOutCubic(qreal t);
     static QColor latte(int alpha);
 
+    QSize m_viewportSize;
     QImage m_logo;
     QImage m_logoWhite;
     QVector<Star> m_stars;

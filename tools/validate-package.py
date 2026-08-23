@@ -44,9 +44,20 @@ for needle in ['Qt-5.6.3-Static-XP.7z', 'Kadia.pro', 'Kadia.exe', 'Microsoft.Vis
         errors.append(f'workflow missing expected token: {needle}')
 
 renderer = (root / 'src/d3d9_renderer.cpp').read_text(encoding='utf-8')
-for needle in ['Direct3DCreate9', 'CreateOffscreenPlainSurface', 'StretchRect', 'Present']:
+for needle in ['Direct3DCreate9', 'CreateOffscreenPlainSurface', 'StretchRect', 'Present', 'D3DPRESENT_INTERVAL_ONE']:
     if needle not in renderer:
         errors.append(f'D3D9 renderer missing expected call: {needle}')
+
+
+window = (root / 'src/kadia_window.cpp').read_text(encoding='utf-8')
+for needle in ['showOnPrimaryMonitor', 'mouseMoveEvent', 'mousePressEvent', 'wheelEvent', 'setInterval(0)']:
+    if needle not in window:
+        errors.append(f'window/input implementation missing expected token: {needle}')
+
+scene = (root / 'src/kadia_scene.cpp').read_text(encoding='utf-8')
+for needle in ['setViewportSize', 'drawTileIcon', 'hoverAt', 'maxTrail']:
+    if needle not in scene:
+        errors.append(f'scene implementation missing expected token: {needle}')
 
 if errors:
     print('PACKAGE VALIDATION FAILED')

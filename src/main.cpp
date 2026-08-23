@@ -19,20 +19,13 @@ int main(int argc, char *argv[])
     const QStringList args = app.arguments();
     const bool windowed = args.contains(QStringLiteral("--windowed"), Qt::CaseInsensitive);
 
-    if (windowed) {
-        QRect available = QApplication::desktop()->availableGeometry();
-        QSize wanted(1280, 720);
-        if (wanted.width() > available.width() || wanted.height() > available.height()) {
-            const QSize safeSize(qMax(320, static_cast<int>(available.width() * 0.90)),
-                                 qMax(240, static_cast<int>(available.height() * 0.90)));
-            wanted.scale(safeSize, Qt::KeepAspectRatio);
-        }
-        window.resize(wanted);
-        window.move(available.center() - QPoint(wanted.width() / 2, wanted.height() / 2));
-        window.show();
-    } else {
-        window.showFullScreen();
-    }
+    // Default mode is a normal, borderless window sized to the primary monitor.
+    // It is deliberately NOT Qt::FullScreen and never uses WindowStaysOnTop, so
+    // Alt+Tab, Win key, task switching and returning to Windows keep working.
+    if (windowed)
+        window.showWindowed();
+    else
+        window.showOnPrimaryMonitor();
 
     return app.exec();
 }

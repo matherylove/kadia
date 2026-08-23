@@ -21,6 +21,7 @@ D3D9Renderer::D3D9Renderer()
     , m_surface(0)
     , m_hwnd(0)
     , m_deviceLost(false)
+    , m_refreshRate(60)
 #endif
 {
 }
@@ -137,7 +138,8 @@ QString D3D9Renderer::description() const
         return QStringLiteral("Direct3D 9 unavailable");
     if (m_adapterName.isEmpty())
         return QStringLiteral("Direct3D 9 BGRA surface presenter");
-    return QStringLiteral("Direct3D 9 BGRA surface presenter · %1").arg(m_adapterName);
+    return QStringLiteral("Direct3D 9 BGRA surface presenter - %1 - %2 Hz VSync")
+        .arg(m_adapterName).arg(refreshRate());
 #else
     return QStringLiteral("Direct3D 9 unavailable on this platform");
 #endif
@@ -146,6 +148,15 @@ QString D3D9Renderer::description() const
 QString D3D9Renderer::lastError() const
 {
     return m_lastError;
+}
+
+int D3D9Renderer::refreshRate() const
+{
+#ifdef Q_OS_WIN
+    return qMax(1, m_refreshRate);
+#else
+    return 60;
+#endif
 }
 
 void D3D9Renderer::setError(const QString &message)
@@ -168,16 +179,26 @@ bool D3D9Renderer::createDevice(HWND hwnd, int width, int height)
     if (SUCCEEDED(m_d3d->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &identifier)))
         m_adapterName = QString::fromLatin1(identifier.Description);
 
+    D3DDISPLAYMODE mode;
+    std::memset(&mode, 0, sizeof(mode));
+    if (SUCCEEDED(m_d3d->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode)) && mode.RefreshRate > 0)
+        m_refreshRate = static_cast<int>(mode.RefreshRate);
+    else
+        m_refreshRate = 60;
+
     D3DPRESENT_PARAMETERS pp;
     std::memset(&pp, 0, sizeof(pp));
     pp.Windowed = TRUE;
-    pp.SwapEffect = D3DSWAPEFFECT_COPY;
+    pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
     pp.hDeviceWindow = hwnd;
     pp.BackBufferWidth = qMax(1, width);
     pp.BackBufferHeight = qMax(1, height);
     pp.BackBufferFormat = D3DFMT_X8R8G8B8;
     pp.BackBufferCount = 1;
-    pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+    // Let D3D9 block on the desktop vertical blank. The render timer runs as
+    // fast as the event loop allows, while Present caps animation delivery at
+    // the primary monitor's real refresh rate (60/75/120/144/etc.).
+    pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
 
     const DWORD flags = D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_FPU_PRESERVE;
     HRESULT hr = m_d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
@@ -228,13 +249,16 @@ bool D3D9Renderer::handleLostDevice()
         D3DPRESENT_PARAMETERS pp;
         std::memset(&pp, 0, sizeof(pp));
         pp.Windowed = TRUE;
-        pp.SwapEffect = D3DSWAPEFFECT_COPY;
+        pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
         pp.hDeviceWindow = m_hwnd;
         pp.BackBufferWidth = qMax(1, m_clientSize.width());
         pp.BackBufferHeight = qMax(1, m_clientSize.height());
         pp.BackBufferFormat = D3DFMT_X8R8G8B8;
         pp.BackBufferCount = 1;
-        pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+        // Let D3D9 block on the desktop vertical blank. The render timer runs as
+    // fast as the event loop allows, while Present caps animation delivery at
+    // the primary monitor's real refresh rate (60/75/120/144/etc.).
+    pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
 
         const HRESULT hr = m_device->Reset(&pp);
         if (FAILED(hr)) {
@@ -269,6 +293,7 @@ void D3D9Renderer::releaseAll()
     m_deviceLost = false;
     m_clientSize = QSize();
     m_adapterName.clear();
+    m_refreshRate = 60;
 }
 
 bool D3D9Renderer::blitToScreen(int width, int height)

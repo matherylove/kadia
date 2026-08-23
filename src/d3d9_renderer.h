@@ -12,9 +12,9 @@
 #endif
 
 // Direct3D 9 presenter derived from the proven D3D9 path in the supplied
-// Sightline project. Kadia renders its exact virtual UI into a BGRA QImage,
-// copies that image into an X8R8G8B8 offscreen surface, and lets D3D9 perform
-// the final scaling/presentation to the native Qt HWND.
+// Sightline project. Kadia renders directly into a BGRA QImage matching the
+// current client size, copies it into an X8R8G8B8 offscreen surface, and lets
+// D3D9 present it to the native Qt HWND synchronized to the monitor refresh.
 class D3D9Renderer
 {
 public:
@@ -29,6 +29,7 @@ public:
     bool isReady() const;
     QString description() const;
     QString lastError() const;
+    int refreshRate() const;
 
 private:
 #ifdef Q_OS_WIN
@@ -49,6 +50,7 @@ private:
     QSize m_frameSize;
     QSize m_clientSize;
     bool m_deviceLost;
+    int m_refreshRate;
     QString m_adapterName;
 #endif
     QString m_lastError;

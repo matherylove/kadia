@@ -15,4 +15,4 @@ The workflow verifies the output PE machine type (`0x014C`) and subsystem versio
 
 Kadia does not depend on Qt's OpenGL/ANGLE choice. The renderer uses `Direct3DCreate9` directly. This avoids ambiguity about whether a particular Qt build selected desktop OpenGL, ANGLE D3D9 or ANGLE D3D11.
 
-The UI is rendered at the HTML port's fixed 1280×720 virtual resolution into BGRA and copied into a D3D9 `X8R8G8B8` offscreen surface. `StretchRect` performs the final aspect-ratio-preserving GPU scale to the back buffer, matching the XP-compatible approach already used in Sightline.
+The UI is rendered directly into a BGRA frame matching the current client size. In the default mode that client size is the full primary-monitor geometry, while all HTML CSS-pixel metrics stay at their original size. The same-size frame is copied into a D3D9 `X8R8G8B8` offscreen surface and presented with `D3DPRESENT_INTERVAL_ONE`, so delivery is synchronized to the desktop refresh rate instead of a fixed 60 Hz timer.

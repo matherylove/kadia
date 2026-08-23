@@ -3,9 +3,12 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDebug>
+#include <QDesktopWidget>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
+#include <QWheelEvent>
 
 KadiaWindow::KadiaWindow(QWidget *parent)
     : QWidget(parent)
@@ -13,6 +16,7 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     , m_frame(m_scene.logicalSize(), QImage::Format_ARGB32_Premultiplied)
     , m_rendererAttempted(false)
     , m_closing(false)
+    , m_monitorMode(false)
 {
     setWindowTitle(QStringLiteral("Mathery Kadia!"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -21,13 +25,16 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     setAttribute(Qt::WA_NoSystemBackground, true);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
     setFocusPolicy(Qt::StrongFocus);
-    setMouseTracking(false);
-    setCursor(Qt::BlankCursor);
+    setMouseTracking(true);
+    setCursor(Qt::ArrowCursor);
     resize(m_scene.logicalSize());
+    m_scene.setViewportSize(size());
 
     m_input.initialize();
 
-    m_timer.setInterval(16);
+    // Present() is VSync-capped by D3D9. A zero-interval precise timer feeds the
+    // renderer immediately after each vertical blank instead of hard-capping at 60 Hz.
+    m_timer.setInterval(0);
     m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, SIGNAL(timeout()), this, SLOT(frameTick()));
 }
@@ -36,6 +43,45 @@ KadiaWindow::~KadiaWindow()
 {
     m_timer.stop();
     m_renderer.shutdown();
+}
+
+void KadiaWindow::showOnPrimaryMonitor()
+{
+    QDesktopWidget *desktop = QApplication::desktop();
+    const int primary = desktop ? desktop->primaryScreen() : 0;
+    const QRect target = desktop ? desktop->screenGeometry(primary) : QRect(0, 0, 1280, 720);
+
+    if (!m_monitorMode && isVisible())
+        m_windowedGeometry = geometry();
+
+    m_monitorMode = true;
+    setGeometry(target);
+    m_scene.setViewportSize(target.size());
+    show();
+    activateWindow();
+}
+
+void KadiaWindow::showWindowed()
+{
+    QDesktopWidget *desktop = QApplication::desktop();
+    const int primary = desktop ? desktop->primaryScreen() : 0;
+    const QRect available = desktop ? desktop->availableGeometry(primary) : QRect(0, 0, 1280, 720);
+
+    QSize wanted(1280, 720);
+    if (wanted.width() > available.width() || wanted.height() > available.height()) {
+        const QSize safe(qMax(320, static_cast<int>(available.width() * 0.90)),
+                         qMax(240, static_cast<int>(available.height() * 0.90)));
+        wanted.scale(safe, Qt::KeepAspectRatio);
+    }
+
+    QRect target(QPoint(0, 0), wanted);
+    target.moveCenter(available.center());
+    m_monitorMode = false;
+    m_windowedGeometry = target;
+    setGeometry(target);
+    m_scene.setViewportSize(target.size());
+    show();
+    activateWindow();
 }
 
 void KadiaWindow::paintEvent(QPaintEvent *event)
@@ -56,6 +102,7 @@ void KadiaWindow::showEvent(QShowEvent *event)
 void KadiaWindow::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    m_scene.setViewportSize(event->size());
     if (m_renderer.isReady())
         m_renderer.resize(qMax(1, event->size().width()), qMax(1, event->size().height()));
 }
@@ -94,13 +141,56 @@ void KadiaWindow::keyPressEvent(QKeyEvent *event)
         m_scene.cycleWordmarkFont();
         break;
     case Qt::Key_F11:
-        isFullScreen() ? showNormal() : showFullScreen();
+        m_monitorMode ? showWindowed() : showOnPrimaryMonitor();
         break;
     default:
         QWidget::keyPressEvent(event);
         return;
     }
     event->accept();
+}
+
+void KadiaWindow::mouseMoveEvent(QMouseEvent *event)
+{
+    if (m_scene.hoverAt(event->localPos()))
+        event->accept();
+    else
+        QWidget::mouseMoveEvent(event);
+}
+
+void KadiaWindow::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::RightButton) {
+        m_scene.handle(KadiaScene::Back);
+        event->accept();
+        return;
+    }
+
+    if (event->button() == Qt::LeftButton && m_scene.clickAt(event->localPos())) {
+        event->accept();
+        return;
+    }
+    QWidget::mousePressEvent(event);
+}
+
+void KadiaWindow::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && m_scene.doubleClickAt(event->localPos())) {
+        event->accept();
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
+}
+
+void KadiaWindow::wheelEvent(QWheelEvent *event)
+{
+    const int delta = event->angleDelta().y();
+    if (delta != 0) {
+        m_scene.wheelAt(QPointF(event->pos()), delta);
+        event->accept();
+        return;
+    }
+    QWidget::wheelEvent(event);
 }
 
 void KadiaWindow::closeEvent(QCloseEvent *event)
@@ -120,8 +210,13 @@ void KadiaWindow::frameTick()
     if (!m_renderer.isReady())
         return;
 
-    const qint64 elapsedMs = m_clock.isValid() ? m_clock.restart() : 16;
-    double dt = elapsedMs > 0 ? static_cast<double>(elapsedMs) / 1000.0 : 1.0 / 60.0;
+    const qint64 elapsedNs = m_clock.isValid() ? m_clock.nsecsElapsed() : 0;
+    if (m_clock.isValid())
+        m_clock.restart();
+    else
+        m_clock.start();
+    const double fallbackDt = 1.0 / static_cast<double>(qMax(1, m_renderer.refreshRate()));
+    double dt = elapsedNs > 0 ? static_cast<double>(elapsedNs) / 1000000000.0 : fallbackDt;
     if (dt > 0.1)
         dt = 0.1;
 
@@ -130,6 +225,7 @@ void KadiaWindow::frameTick()
         dispatch(action);
     m_scene.setControllerConnected(m_input.controllerConnected());
 
+    m_scene.setViewportSize(size());
     m_scene.update(dt);
     m_scene.render(m_frame);
     if (!m_renderer.present(m_frame) && !m_renderer.lastError().isEmpty())
