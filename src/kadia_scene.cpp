@@ -1134,7 +1134,7 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
     auto has = [&](const char *needle) -> bool {
         return key.contains(QString::fromLatin1(needle));
     };
-    auto linePen = [&](qreal width, const QColor &color = c) {
+    auto linePen = [&](qreal width, QColor color = QColor(255, 248, 231, 220)) {
         return QPen(color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
     };
     auto fillStroke = [&](const QPainterPath &path, bool filled, qreal width = 1.9) {
