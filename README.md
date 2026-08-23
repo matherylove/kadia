@@ -104,3 +104,10 @@ The GitHub Actions workflow does this automatically.
 ## XP notes
 
 The source intentionally avoids DWM, Direct2D, DirectWrite, WASAPI, WebEngine, QML and post-XP Win32 APIs. D3D9 and dynamically loaded XInput are used directly. If XInput is not installed on an XP machine, keyboard input still works and Kadia does not fail to start because no XInput import library is linked.
+
+
+## Icon refresh
+
+- Tile icons are now drawn with a semantic vector icon system instead of generic glyph fallbacks.
+- Each option gets a unique icon signature derived from its section + label, so repeated labels across different sections no longer reuse the same exact icon.
+- Icons remain native `QPainter` geometry for Qt 5.6 / XP compatibility.

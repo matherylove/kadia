@@ -1108,6 +1108,7 @@ void KadiaScene::drawTile(QPainter &p, const QRectF &rect, float selection,
     p.restore();
 }
 
+
 void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &icon,
                               const QString &label, float selection)
 {
@@ -1115,15 +1116,36 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
 
-    const QColor c(255, 248, 231, 215);
+    const QColor c(255, 248, 231, 220);
+    const QColor accent(215, 229, 255, static_cast<int>(132 + 45 * selection));
+    const QColor warm(255, 232, 188, static_cast<int>(118 + 55 * selection));
     const qreal pi = 3.14159265358979323846;
     const QPointF center = rect.center();
     const qreal scale = 1.0 + 0.08 * selection;
-    const qreal base = qMin(rect.width(), rect.height()) * 0.20 * scale;
-    const QString key = label.toLower();
+    const qreal base = qMin(rect.width(), rect.height()) * 0.19 * scale;
 
-    auto linePen = [&](qreal width) {
-        return QPen(c, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    QString sectionKey;
+    const QVector<KadiaSectionInfo> &sections = kadiaSections();
+    if (m_category >= 0 && m_category < sections.size())
+        sectionKey = sections[m_category].name.toLower();
+    const QString key = (sectionKey + QStringLiteral(" ") + label + QStringLiteral(" ") + icon).toLower();
+    const uint signature = qHash(sectionKey + QStringLiteral("|") + label + QStringLiteral("|") + icon);
+
+    auto has = [&](const char *needle) -> bool {
+        return key.contains(QString::fromLatin1(needle));
+    };
+    auto linePen = [&](qreal width, const QColor &color = c) {
+        return QPen(color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    };
+    auto fillStroke = [&](const QPainterPath &path, bool filled, qreal width = 1.9) {
+        if (filled) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(c);
+        } else {
+            p.setPen(linePen(width));
+            p.setBrush(Qt::NoBrush);
+        }
+        p.drawPath(path);
     };
 
     auto drawDiamond = [&](bool filled) {
@@ -1133,56 +1155,42 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
         path.lineTo(center.x(), center.y() + base);
         path.lineTo(center.x() - base, center.y());
         path.closeSubpath();
-        if (filled) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(c);
-        } else {
-            p.setPen(linePen(2.0));
-            p.setBrush(Qt::NoBrush);
-        }
-        p.drawPath(path);
+        fillStroke(path, filled, 1.8);
     };
 
-    auto drawStar = [&](bool filled) {
+    auto drawEightPointStar = [&](bool filled) {
         QPainterPath path;
-        const int points = 8;
-        for (int i = 0; i < points; ++i) {
+        for (int i = 0; i < 8; ++i) {
             const qreal a = -pi * 0.5 + i * pi / 4.0;
-            const qreal r = (i % 2 == 0) ? base : base * 0.42;
+            const qreal r = (i % 2 == 0) ? base : base * 0.44;
             const QPointF pt(center.x() + qCos(a) * r, center.y() + qSin(a) * r);
             if (i == 0) path.moveTo(pt); else path.lineTo(pt);
         }
         path.closeSubpath();
-        if (filled) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(c);
-        } else {
-            p.setPen(linePen(1.8));
-            p.setBrush(Qt::NoBrush);
-        }
-        p.drawPath(path);
+        fillStroke(path, filled, 1.8);
     };
 
-    auto drawGrid = [&]() {
+    auto drawGrid = [&](int cols, int rows) {
         p.setPen(Qt::NoPen);
         p.setBrush(c);
         const qreal cell = base * 0.42;
-        const qreal gap = base * 0.20;
-        const qreal total = cell * 3.0 + gap * 2.0;
-        const qreal x0 = center.x() - total * 0.5;
-        const qreal y0 = center.y() - total * 0.5;
-        for (int y = 0; y < 3; ++y)
-            for (int x = 0; x < 3; ++x)
-                p.drawRoundedRect(QRectF(x0 + x * (cell + gap), y0 + y * (cell + gap), cell, cell), 1.2, 1.2);
+        const qreal gap = base * 0.19;
+        const qreal totalW = cols * cell + (cols - 1) * gap;
+        const qreal totalH = rows * cell + (rows - 1) * gap;
+        const qreal x0 = center.x() - totalW * 0.5;
+        const qreal y0 = center.y() - totalH * 0.5;
+        for (int y = 0; y < rows; ++y)
+            for (int x = 0; x < cols; ++x)
+                p.drawRoundedRect(QRectF(x0 + x * (cell + gap), y0 + y * (cell + gap), cell, cell), 1.15, 1.15);
     };
 
     auto drawSearch = [&]() {
         p.setBrush(Qt::NoBrush);
-        p.setPen(linePen(2.4));
+        p.setPen(linePen(2.35));
         const qreal r = base * 0.68;
         p.drawEllipse(QPointF(center.x() - base * 0.18, center.y() - base * 0.12), r, r);
-        p.drawLine(QPointF(center.x() + base * 0.30, center.y() + base * 0.36),
-                   QPointF(center.x() + base * 0.92, center.y() + base * 0.98));
+        p.drawLine(QPointF(center.x() + base * 0.28, center.y() + base * 0.34),
+                   QPointF(center.x() + base * 0.94, center.y() + base * 1.00));
     };
 
     auto drawPlay = [&]() {
@@ -1194,18 +1202,20 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
         p.fillPath(path, c);
     };
 
-    auto drawScreen = [&]() {
+    auto drawScreen = [&](bool withStand) {
         p.setBrush(Qt::NoBrush);
-        p.setPen(linePen(2.0));
+        p.setPen(linePen(1.95));
         QRectF screen(center.x() - base, center.y() - base * 0.68, base * 2.0, base * 1.36);
         p.drawRoundedRect(screen, 2.0, 2.0);
-        p.drawLine(QPointF(center.x() - base * 0.30, screen.bottom() + base * 0.30),
-                   QPointF(center.x() + base * 0.30, screen.bottom() + base * 0.30));
-        p.drawLine(QPointF(center.x(), screen.bottom()), QPointF(center.x(), screen.bottom() + base * 0.30));
+        if (withStand) {
+            p.drawLine(QPointF(center.x() - base * 0.30, screen.bottom() + base * 0.30),
+                       QPointF(center.x() + base * 0.30, screen.bottom() + base * 0.30));
+            p.drawLine(QPointF(center.x(), screen.bottom()), QPointF(center.x(), screen.bottom() + base * 0.30));
+        }
     };
 
     auto drawMusic = [&]() {
-        p.setPen(linePen(2.2));
+        p.setPen(linePen(2.1));
         p.setBrush(c);
         const qreal stemX = center.x() + base * 0.38;
         p.drawLine(QPointF(stemX, center.y() - base * 0.90), QPointF(stemX, center.y() + base * 0.45));
@@ -1214,11 +1224,11 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
         p.drawEllipse(QPointF(stemX - base * 0.08, center.y() + base * 0.48), base * 0.34, base * 0.26);
     };
 
-    auto drawList = [&]() {
-        p.setPen(linePen(1.9));
-        for (int i = -1; i <= 1; ++i) {
-            const qreal y = center.y() + i * base * 0.55;
-            p.drawEllipse(QPointF(center.x() - base * 0.82, y), 1.5, 1.5);
+    auto drawList = [&](int count) {
+        p.setPen(linePen(1.85));
+        for (int i = 0; i < count; ++i) {
+            const qreal y = center.y() + (i - (count - 1) * 0.5) * base * 0.50;
+            p.drawEllipse(QPointF(center.x() - base * 0.82, y), 1.4, 1.4);
             p.drawLine(QPointF(center.x() - base * 0.48, y), QPointF(center.x() + base * 0.88, y));
         }
     };
@@ -1254,7 +1264,7 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
     };
 
     auto drawGear = [&]() {
-        p.setPen(linePen(2.0));
+        p.setPen(linePen(1.95));
         p.setBrush(Qt::NoBrush);
         p.drawEllipse(center, base * 0.50, base * 0.50);
         p.drawEllipse(center, base * 0.18, base * 0.18);
@@ -1266,14 +1276,14 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
     };
 
     auto drawPower = [&]() {
-        p.setPen(linePen(2.3));
+        p.setPen(linePen(2.25));
         p.setBrush(Qt::NoBrush);
         p.drawArc(QRectF(center.x() - base, center.y() - base, base * 2, base * 2), 40 * 16, 280 * 16);
         p.drawLine(QPointF(center.x(), center.y() - base * 1.05), QPointF(center.x(), center.y() - base * 0.15));
     };
 
     auto drawRefresh = [&]() {
-        p.setPen(linePen(2.0));
+        p.setPen(linePen(1.95));
         p.setBrush(Qt::NoBrush);
         p.drawArc(QRectF(center.x() - base, center.y() - base, base * 2, base * 2), 25 * 16, 290 * 16);
         QPainterPath arrow;
@@ -1284,67 +1294,314 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
         p.fillPath(arrow, c);
     };
 
-    if (key.contains(QStringLiteral("search"))) {
-        drawSearch();
-    } else if (key.contains(QStringLiteral("music")) || key.contains(QStringLiteral("song")) || key.contains(QStringLiteral("radio"))) {
-        drawMusic();
-    } else if (key.contains(QStringLiteral("favorite")) || key.contains(QStringLiteral("achievement")) || key.contains(QStringLiteral("rating"))) {
-        drawStar(false);
-    } else if (key.contains(QStringLiteral("controller")) || key.contains(QStringLiteral("player")) || key.contains(QStringLiteral("pad"))) {
-        drawController();
-    } else if (key.contains(QStringLiteral("setting")) || key.contains(QStringLiteral("config")) || key.contains(QStringLiteral("driver")) || key.contains(QStringLiteral("setup"))) {
-        drawGear();
-    } else if (key.contains(QStringLiteral("power")) || key.contains(QStringLiteral("shut")) || key.contains(QStringLiteral("sleep")) || key.contains(QStringLiteral("quit")) || key.contains(QStringLiteral("exit"))) {
-        drawPower();
-    } else if (key.contains(QStringLiteral("update")) || key.contains(QStringLiteral("refresh")) || key.contains(QStringLiteral("automatic"))) {
-        drawRefresh();
-    } else if (key.contains(QStringLiteral("video")) || key.contains(QStringLiteral("movie")) || key.contains(QStringLiteral("tv")) || key.contains(QStringLiteral("dvd"))) {
-        drawScreen();
-    } else if (key.contains(QStringLiteral("play")) || key.contains(QStringLiteral("continue"))) {
-        drawPlay();
-    } else if (key.contains(QStringLiteral("picture")) || key.contains(QStringLiteral("screenshot")) || key.contains(QStringLiteral("fanart")) || key.contains(QStringLiteral("box art"))) {
-        drawScreen();
-    } else if (key.contains(QStringLiteral("guide")) || key.contains(QStringLiteral("playlist")) || key.contains(QStringLiteral("list")) || key.contains(QStringLiteral("filter")) || key.contains(QStringLiteral("sort"))) {
-        drawList();
-    } else if (key == QStringLiteral("nintendo")) {
-        drawDiamond(true);
-    } else if (key == QStringLiteral("super nintendo")) {
-        drawStar(true);
-    } else if (key == QStringLiteral("sega")) {
-        p.setBrush(Qt::NoBrush); p.setPen(linePen(2.2));
-        p.drawEllipse(center, base, base); p.drawEllipse(center, base * 0.52, base * 0.52);
-    } else if (key == QStringLiteral("playstation") || key.contains(QStringLiteral("epic"))) {
-        drawDiamond(false);
-    } else if (key.contains(QStringLiteral("xbox")) || key.contains(QStringLiteral("windows"))) {
-        p.setPen(linePen(1.8)); p.setBrush(Qt::NoBrush);
-        const qreal b = base * 0.82;
-        p.drawRect(QRectF(center.x()-b, center.y()-b, b*2, b*2));
-        p.drawLine(QPointF(center.x(), center.y()-b), QPointF(center.x(), center.y()+b));
-        p.drawLine(QPointF(center.x()-b, center.y()), QPointF(center.x()+b, center.y()));
-    } else if (key.contains(QStringLiteral("atari"))) {
-        p.setPen(linePen(2.0)); p.setBrush(Qt::NoBrush);
-        QPainterPath tri; tri.moveTo(center.x(),center.y()-base); tri.lineTo(center.x()+base,center.y()+base*0.85); tri.lineTo(center.x()-base,center.y()+base*0.85); tri.closeSubpath();
-        p.drawPath(tri);
-    } else if (key.contains(QStringLiteral("nec"))) {
-        p.setPen(linePen(2.0)); p.setBrush(Qt::NoBrush); p.drawEllipse(center,base,base);
-        p.setBrush(c); p.setPen(Qt::NoPen); p.drawEllipse(center,base*0.18,base*0.18);
-    } else if (key.contains(QStringLiteral("game boy")) || key.contains(QStringLiteral("psp")) || key.contains(QStringLiteral("vita")) || key.contains(QStringLiteral("handheld"))) {
-        p.setPen(linePen(2.0)); p.setBrush(Qt::NoBrush);
-        p.drawRoundedRect(QRectF(center.x()-base*1.05, center.y()-base*0.62, base*2.10, base*1.24), base*0.18, base*0.18);
+    auto drawHandheld = [&]() {
+        p.setPen(linePen(1.95));
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(QRectF(center.x() - base * 1.05, center.y() - base * 0.62,
+                                 base * 2.10, base * 1.24), base * 0.18, base * 0.18);
+        p.drawRect(QRectF(center.x() - base * 0.38, center.y() - base * 0.28,
+                          base * 0.76, base * 0.56));
         p.setBrush(c); p.setPen(Qt::NoPen);
-        p.drawEllipse(QPointF(center.x()+base*0.58,center.y()),base*0.10,base*0.10);
-    } else if (key.contains(QStringLiteral("all games")) || key.contains(QStringLiteral("library")) || key.contains(QStringLiteral("system")) || key.contains(QStringLiteral("collection")) || key.contains(QStringLiteral("scrape")) || key.contains(QStringLiteral("content"))) {
-        drawGrid();
-    } else {
-        // Deterministic geometric fallback. Never render the raw Unicode icon
-        // string, so an XP compiler/codepage mismatch can no longer turn icons
-        // into mojibake such as "mojibake glyphs".
-        const uint h = qHash(label);
-        if ((h & 3u) == 0u) drawDiamond(false);
-        else if ((h & 3u) == 1u) drawStar(false);
-        else if ((h & 3u) == 2u) drawGrid();
-        else { p.setBrush(Qt::NoBrush); p.setPen(linePen(2.0)); p.drawEllipse(center, base, base); }
+        p.drawEllipse(QPointF(center.x() + base * 0.62, center.y()), base * 0.10, base * 0.10);
+    };
+
+    auto drawFolder = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(1.95));
+        QPainterPath path;
+        path.moveTo(center.x() - base * 1.00, center.y() - base * 0.42);
+        path.lineTo(center.x() - base * 0.34, center.y() - base * 0.42);
+        path.lineTo(center.x() - base * 0.08, center.y() - base * 0.72);
+        path.lineTo(center.x() + base * 1.00, center.y() - base * 0.72);
+        path.lineTo(center.x() + base * 1.00, center.y() + base * 0.72);
+        path.lineTo(center.x() - base * 1.00, center.y() + base * 0.72);
+        path.closeSubpath();
+        p.drawPath(path);
+    };
+
+    auto drawPicture = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(1.9));
+        QRectF r(center.x() - base, center.y() - base * 0.72, base * 2.0, base * 1.44);
+        p.drawRoundedRect(r, 2.0, 2.0);
+        p.drawEllipse(QPointF(r.right() - base * 0.38, r.top() + base * 0.30), base * 0.12, base * 0.12);
+        QPainterPath hill;
+        hill.moveTo(r.left() + base * 0.22, r.bottom() - base * 0.20);
+        hill.lineTo(r.left() + base * 0.70, r.top() + base * 0.15);
+        hill.lineTo(r.left() + base * 1.15, r.bottom() - base * 0.18);
+        hill.lineTo(r.left() + base * 1.55, r.top() + base * 0.34);
+        hill.lineTo(r.right() - base * 0.18, r.bottom() - base * 0.18);
+        p.drawPath(hill);
+    };
+
+    auto drawClock = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(1.95));
+        p.drawEllipse(center, base * 0.92, base * 0.92);
+        p.drawLine(center, QPointF(center.x(), center.y() - base * 0.44));
+        p.drawLine(center, QPointF(center.x() + base * 0.36, center.y() + base * 0.14));
+    };
+
+    auto drawDownload = [&]() {
+        p.setPen(linePen(1.95));
+        p.setBrush(Qt::NoBrush);
+        p.drawLine(QPointF(center.x(), center.y() - base * 0.86), QPointF(center.x(), center.y() + base * 0.36));
+        p.drawLine(QPointF(center.x() - base * 0.36, center.y() + base * 0.02), QPointF(center.x(), center.y() + base * 0.38));
+        p.drawLine(QPointF(center.x() + base * 0.36, center.y() + base * 0.02), QPointF(center.x(), center.y() + base * 0.38));
+        p.drawLine(QPointF(center.x() - base * 0.86, center.y() + base * 0.70), QPointF(center.x() + base * 0.86, center.y() + base * 0.70));
+    };
+
+    auto drawBars = [&]() {
+        p.setPen(Qt::NoPen);
+        p.setBrush(c);
+        const qreal w = base * 0.36;
+        for (int i = 0; i < 4; ++i) {
+            const qreal h = base * (0.46 + i * 0.16);
+            const qreal x = center.x() - base * 0.88 + i * (w + base * 0.15);
+            p.drawRoundedRect(QRectF(x, center.y() + base * 0.78 - h, w, h), 1.0, 1.0);
+        }
+    };
+
+    auto drawBook = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(1.9));
+        QRectF left(center.x() - base * 1.02, center.y() - base * 0.72, base * 0.94, base * 1.44);
+        QRectF right(center.x() + base * 0.08, center.y() - base * 0.72, base * 0.94, base * 1.44);
+        p.drawRoundedRect(left, 1.5, 1.5);
+        p.drawRoundedRect(right, 1.5, 1.5);
+        p.drawLine(QPointF(center.x(), left.top()), QPointF(center.x(), left.bottom()));
+    };
+
+    auto drawGlobe = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(1.85));
+        p.drawEllipse(center, base * 0.95, base * 0.95);
+        p.drawEllipse(center, base * 0.42, base * 0.95);
+        p.drawLine(QPointF(center.x() - base * 0.95, center.y()), QPointF(center.x() + base * 0.95, center.y()));
+        p.drawArc(QRectF(center.x() - base * 0.95, center.y() - base * 0.42, base * 1.9, base * 0.84), 0, 180 * 16);
+        p.drawArc(QRectF(center.x() - base * 0.95, center.y() - base * 0.42, base * 1.9, base * 0.84), 180 * 16, 180 * 16);
+    };
+
+    auto drawFilm = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(1.9));
+        QRectF r(center.x() - base * 1.00, center.y() - base * 0.68, base * 2.0, base * 1.36);
+        p.drawRoundedRect(r, 1.8, 1.8);
+        for (int i = 0; i < 4; ++i) {
+            p.drawRect(QRectF(r.left() - 0.2, r.top() + base * 0.10 + i * base * 0.34, base * 0.22, base * 0.16));
+            p.drawRect(QRectF(r.right() - base * 0.22 + 0.2, r.top() + base * 0.10 + i * base * 0.34, base * 0.22, base * 0.16));
+        }
+    };
+
+    auto drawDisc = [&]() {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(linePen(1.9));
+        p.drawEllipse(center, base * 0.95, base * 0.95);
+        p.drawEllipse(center, base * 0.24, base * 0.24);
+        p.drawLine(QPointF(center.x() + base * 0.46, center.y() - base * 0.28),
+                   QPointF(center.x() + base * 0.72, center.y() - base * 0.52));
+    };
+
+    auto drawWand = [&]() {
+        p.setPen(linePen(1.95));
+        p.drawLine(QPointF(center.x() - base * 0.72, center.y() + base * 0.72),
+                   QPointF(center.x() + base * 0.62, center.y() - base * 0.62));
+        p.setBrush(c); p.setPen(Qt::NoPen);
+        p.drawEllipse(QPointF(center.x() + base * 0.74, center.y() - base * 0.74), base * 0.14, base * 0.14);
+        p.drawEllipse(QPointF(center.x() + base * 0.52, center.y() - base * 0.96), base * 0.08, base * 0.08);
+        p.drawEllipse(QPointF(center.x() + base * 0.96, center.y() - base * 0.52), base * 0.08, base * 0.08);
+    };
+
+    auto drawArrows = [&]() {
+        p.setPen(linePen(1.9));
+        p.drawLine(QPointF(center.x() - base * 0.88, center.y()), QPointF(center.x() + base * 0.88, center.y()));
+        p.drawLine(QPointF(center.x() - base * 0.88, center.y()), QPointF(center.x() - base * 0.46, center.y() - base * 0.42));
+        p.drawLine(QPointF(center.x() - base * 0.88, center.y()), QPointF(center.x() - base * 0.46, center.y() + base * 0.42));
+        p.drawLine(QPointF(center.x() + base * 0.88, center.y()), QPointF(center.x() + base * 0.46, center.y() - base * 0.42));
+        p.drawLine(QPointF(center.x() + base * 0.88, center.y()), QPointF(center.x() + base * 0.46, center.y() + base * 0.42));
+    };
+
+    auto drawSliders = [&]() {
+        p.setPen(linePen(1.85));
+        const qreal y1 = center.y() - base * 0.46;
+        const qreal y2 = center.y();
+        const qreal y3 = center.y() + base * 0.46;
+        p.drawLine(QPointF(center.x() - base, y1), QPointF(center.x() + base, y1));
+        p.drawLine(QPointF(center.x() - base, y2), QPointF(center.x() + base, y2));
+        p.drawLine(QPointF(center.x() - base, y3), QPointF(center.x() + base, y3));
+        p.setBrush(c); p.setPen(Qt::NoPen);
+        p.drawEllipse(QPointF(center.x() - base * 0.32, y1), base * 0.14, base * 0.14);
+        p.drawEllipse(QPointF(center.x() + base * 0.28, y2), base * 0.14, base * 0.14);
+        p.drawEllipse(QPointF(center.x() - base * 0.05, y3), base * 0.14, base * 0.14);
+    };
+
+    auto drawSpeaker = [&]() {
+        p.setPen(Qt::NoPen); p.setBrush(c);
+        QPainterPath sp;
+        sp.moveTo(center.x() - base * 0.95, center.y() - base * 0.36);
+        sp.lineTo(center.x() - base * 0.48, center.y() - base * 0.36);
+        sp.lineTo(center.x() - base * 0.08, center.y() - base * 0.74);
+        sp.lineTo(center.x() - base * 0.08, center.y() + base * 0.74);
+        sp.lineTo(center.x() - base * 0.48, center.y() + base * 0.36);
+        sp.lineTo(center.x() - base * 0.95, center.y() + base * 0.36);
+        sp.closeSubpath();
+        p.fillPath(sp, c);
+        p.setPen(linePen(1.6)); p.setBrush(Qt::NoBrush);
+        p.drawArc(QRectF(center.x() - base * 0.10, center.y() - base * 0.52, base * 1.10, base * 1.04), -45 * 16, 90 * 16);
+        p.drawArc(QRectF(center.x() + base * 0.06, center.y() - base * 0.76, base * 1.34, base * 1.52), -45 * 16, 90 * 16);
+    };
+
+    auto drawRocket = [&]() {
+        p.setPen(linePen(1.85));
+        p.setBrush(Qt::NoBrush);
+        QPainterPath rocket;
+        rocket.moveTo(center.x(), center.y() - base * 1.04);
+        rocket.cubicTo(center.x() + base * 0.76, center.y() - base * 0.62,
+                       center.x() + base * 0.64, center.y() + base * 0.32,
+                       center.x(), center.y() + base * 0.95);
+        rocket.cubicTo(center.x() - base * 0.64, center.y() + base * 0.32,
+                       center.x() - base * 0.76, center.y() - base * 0.62,
+                       center.x(), center.y() - base * 1.04);
+        rocket.closeSubpath();
+        p.drawPath(rocket);
+        p.drawEllipse(QPointF(center.x(), center.y() - base * 0.20), base * 0.18, base * 0.18);
+        p.drawLine(QPointF(center.x() - base * 0.20, center.y() + base * 0.52), QPointF(center.x() - base * 0.56, center.y() + base * 0.82));
+        p.drawLine(QPointF(center.x() + base * 0.20, center.y() + base * 0.52), QPointF(center.x() + base * 0.56, center.y() + base * 0.82));
+    };
+
+    enum IconFamily {
+        FamilyGrid, FamilySearch, FamilyPlay, FamilyScreen, FamilyMusic,
+        FamilyStar, FamilyController, FamilyGear, FamilyPower, FamilyRefresh,
+        FamilyHandheld, FamilyFolder, FamilyPicture, FamilyClock, FamilyDownload,
+        FamilyBars, FamilyBook, FamilyGlobe, FamilyFilm, FamilyDisc,
+        FamilyWand, FamilyArrows, FamilySliders, FamilySpeaker, FamilyRocket,
+        FamilyDiamond, FamilyRing
+    };
+
+    IconFamily family = FamilyDiamond;
+    bool filledVariant = false;
+
+    if (has("search")) family = FamilySearch;
+    else if (has("music") || has("song") || has("radio") || has("album") || has("artist")) family = FamilyMusic;
+    else if (has("favorite") || has("achievement") || has("rating")) family = FamilyStar;
+    else if (has("controller") || has("player") || has("pad") || has("input")) family = FamilyController;
+    else if (has("setting") || has("config") || has("driver") || has("setup") || has("tool")) family = FamilyGear;
+    else if (has("power") || has("shut") || has("sleep") || has("quit") || has("exit")) family = FamilyPower;
+    else if (has("update") || has("refresh") || has("automatic") || has("restart")) family = FamilyRefresh;
+    else if (has("video") || has("movie") || has("tv") || has("dvd") || has("display")) family = FamilyScreen;
+    else if (has("play") || has("continue") || has("resume") || has("now playing")) family = FamilyPlay;
+    else if (has("picture") || has("screenshot") || has("fanart") || has("box art") || has("photo") || has("slide show")) family = FamilyPicture;
+    else if (has("guide") || has("playlist") || has("list") || has("filter") || has("sort")) family = FamilyBars;
+    else if (key == QStringLiteral("consoles nintendo") || key.contains(QStringLiteral(" nintendo"))) { family = FamilyDiamond; filledVariant = true; }
+    else if (key.contains(QStringLiteral("super nintendo"))) { family = FamilyStar; filledVariant = true; }
+    else if (key.contains(QStringLiteral("sega"))) family = FamilyRing;
+    else if (key.contains(QStringLiteral("playstation")) || key.contains(QStringLiteral("epic"))) family = FamilyDiamond;
+    else if (key.contains(QStringLiteral("xbox")) || key.contains(QStringLiteral("windows"))) family = FamilyGrid;
+    else if (key.contains(QStringLiteral("atari"))) family = FamilyRocket;
+    else if (key.contains(QStringLiteral("nec"))) family = FamilyDisc;
+    else if (key.contains(QStringLiteral("game boy")) || key.contains(QStringLiteral("psp")) || key.contains(QStringLiteral("vita")) || has("handheld")) family = FamilyHandheld;
+    else if (has("all games") || has("library") || has("system") || has("collection") || has("content")) family = FamilyGrid;
+    else if (has("download") || has("install") || has("scrape")) family = FamilyDownload;
+    else if (has("information") || has("manual") || has("language")) family = FamilyBook;
+    else if (has("clock") || has("hour") || has("time") || has("recent") || has("last played")) family = FamilyClock;
+    else if (has("volume") || has("mute") || has("audio") || has("sound")) family = FamilySpeaker;
+    else if (has("theme") || has("interface") || has("screen saver") || has("screensaver")) family = FamilyWand;
+    else if (has("sync") || has("netplay") || has("online") || has("internet")) family = FamilyGlobe;
+    else if (has("burn") || has("disc") || has("cd ") || has("dvd")) family = FamilyDisc;
+    else if (has("movie") || has("recorded") || has("recording") || has("trailer")) family = FamilyFilm;
+    else if (has("latency") || has("optimization") || has("performance") || has("statistics") || has("score")) family = FamilyBars;
+    else if (has("shader") || has("aspect") || has("transition") || has("mode") || has("display options")) family = FamilySliders;
+    else if (has("folder") || has("library")) family = FamilyFolder;
+    else if (has("random") || has("free games") || has("services") || has("extras")) family = FamilyRocket;
+    else if (has("move") || has("jump") || has("browse") || has("extender")) family = FamilyArrows;
+
+    switch (family) {
+    case FamilyGrid:      drawGrid(3, 3); break;
+    case FamilySearch:    drawSearch(); break;
+    case FamilyPlay:      drawPlay(); break;
+    case FamilyScreen:    drawScreen(true); break;
+    case FamilyMusic:     drawMusic(); break;
+    case FamilyStar:      drawEightPointStar(filledVariant); break;
+    case FamilyController: drawController(); break;
+    case FamilyGear:      drawGear(); break;
+    case FamilyPower:     drawPower(); break;
+    case FamilyRefresh:   drawRefresh(); break;
+    case FamilyHandheld:  drawHandheld(); break;
+    case FamilyFolder:    drawFolder(); break;
+    case FamilyPicture:   drawPicture(); break;
+    case FamilyClock:     drawClock(); break;
+    case FamilyDownload:  drawDownload(); break;
+    case FamilyBars:      drawBars(); break;
+    case FamilyBook:      drawBook(); break;
+    case FamilyGlobe:     drawGlobe(); break;
+    case FamilyFilm:      drawFilm(); break;
+    case FamilyDisc:      drawDisc(); break;
+    case FamilyWand:      drawWand(); break;
+    case FamilyArrows:    drawArrows(); break;
+    case FamilySliders:   drawSliders(); break;
+    case FamilySpeaker:   drawSpeaker(); break;
+    case FamilyRocket:    drawRocket(); break;
+    case FamilyDiamond:   drawDiamond(filledVariant); break;
+    case FamilyRing:
+        p.setBrush(Qt::NoBrush); p.setPen(linePen(2.1));
+        p.drawEllipse(center, base * 0.92, base * 0.92); p.drawEllipse(center, base * 0.48, base * 0.48);
+        break;
     }
+
+    // Unique per-option identity marks. These sit around the main glyph and are
+    // derived from section + label, so repeated menu items such as "Search" and
+    // "Favorites" no longer share identical icons.
+    const int cornerShape = signature % 7;
+    const int orbitShape = (signature / 7u) % 6u;
+    const int footerPattern = (signature / 43u) % 8u;
+    const int sideMark = (signature / 349u) % 5u;
+
+    const QPointF corner(center.x() + base * 1.02, center.y() - base * 0.96);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(linePen(1.25, accent));
+    switch (cornerShape) {
+    case 0: p.drawEllipse(corner, base * 0.15, base * 0.15); break;
+    case 1: p.drawRect(QRectF(corner.x() - base * 0.14, corner.y() - base * 0.14, base * 0.28, base * 0.28)); break;
+    case 2: {
+        QPainterPath d; d.moveTo(corner.x(), corner.y() - base * 0.17); d.lineTo(corner.x() + base * 0.17, corner.y()); d.lineTo(corner.x(), corner.y() + base * 0.17); d.lineTo(corner.x() - base * 0.17, corner.y()); d.closeSubpath(); p.drawPath(d); break; }
+    case 3: p.drawLine(QPointF(corner.x() - base * 0.18, corner.y()), QPointF(corner.x() + base * 0.18, corner.y())); p.drawLine(QPointF(corner.x(), corner.y() - base * 0.18), QPointF(corner.x(), corner.y() + base * 0.18)); break;
+    case 4: p.drawArc(QRectF(corner.x() - base * 0.20, corner.y() - base * 0.20, base * 0.40, base * 0.40), 20 * 16, 260 * 16); break;
+    case 5: p.drawLine(QPointF(corner.x() - base * 0.16, corner.y() - base * 0.16), QPointF(corner.x() + base * 0.16, corner.y() + base * 0.16)); p.drawLine(QPointF(corner.x() - base * 0.16, corner.y() + base * 0.16), QPointF(corner.x() + base * 0.16, corner.y() - base * 0.16)); break;
+    default: p.setPen(Qt::NoPen); p.setBrush(accent); p.drawEllipse(corner, base * 0.10, base * 0.10); break;
+    }
+
+    p.setPen(linePen(1.15, warm));
+    switch (orbitShape) {
+    case 0: p.drawArc(QRectF(center.x() - base * 1.22, center.y() - base * 1.00, base * 0.62, base * 0.62), 240 * 16, 110 * 16); break;
+    case 1: p.drawLine(QPointF(center.x() - base * 1.18, center.y() + base * 0.90), QPointF(center.x() - base * 0.66, center.y() + base * 0.56)); break;
+    case 2: p.drawArc(QRectF(center.x() + base * 0.58, center.y() + base * 0.56, base * 0.54, base * 0.54), 60 * 16, 160 * 16); break;
+    case 3: p.drawLine(QPointF(center.x() + base * 0.76, center.y() - base * 1.10), QPointF(center.x() + base * 1.08, center.y() - base * 0.78)); break;
+    case 4: p.drawEllipse(QPointF(center.x() - base * 1.00, center.y() - base * 0.86), base * 0.08, base * 0.08); break;
+    default: p.drawEllipse(QPointF(center.x() + base * 0.96, center.y() + base * 0.98), base * 0.08, base * 0.08); break;
+    }
+
+    const qreal footY = center.y() + base * 1.18;
+    p.setPen(linePen(1.10, QColor(255, 248, 231, 110)));
+    switch (footerPattern) {
+    case 0: p.drawLine(QPointF(center.x() - base * 0.56, footY), QPointF(center.x() + base * 0.56, footY)); break;
+    case 1: p.drawLine(QPointF(center.x() - base * 0.56, footY), QPointF(center.x() - base * 0.10, footY)); p.drawLine(QPointF(center.x() + base * 0.10, footY), QPointF(center.x() + base * 0.56, footY)); break;
+    case 2: p.drawEllipse(QPointF(center.x() - base * 0.28, footY), base * 0.08, base * 0.08); p.drawEllipse(QPointF(center.x() + base * 0.28, footY), base * 0.08, base * 0.08); break;
+    case 3: p.drawLine(QPointF(center.x() - base * 0.34, footY), QPointF(center.x(), footY)); p.drawLine(QPointF(center.x(), footY), QPointF(center.x(), footY + base * 0.14)); p.drawLine(QPointF(center.x(), footY), QPointF(center.x() + base * 0.34, footY)); break;
+    case 4: p.drawArc(QRectF(center.x() - base * 0.42, footY - base * 0.16, base * 0.84, base * 0.32), 200 * 16, 140 * 16); break;
+    case 5: p.drawLine(QPointF(center.x() - base * 0.48, footY - base * 0.08), QPointF(center.x() - base * 0.12, footY + base * 0.08)); p.drawLine(QPointF(center.x() + base * 0.12, footY + base * 0.08), QPointF(center.x() + base * 0.48, footY - base * 0.08)); break;
+    case 6: p.drawRect(QRectF(center.x() - base * 0.10, footY - base * 0.10, base * 0.20, base * 0.20)); break;
+    default: p.drawEllipse(QPointF(center.x(), footY), base * 0.10, base * 0.10); break;
+    }
+
+    p.setPen(linePen(1.0, QColor(255,248,231,98)));
+    switch (sideMark) {
+    case 0: p.drawLine(QPointF(center.x() - base * 1.18, center.y() - base * 0.12), QPointF(center.x() - base * 0.88, center.y() - base * 0.12)); break;
+    case 1: p.drawLine(QPointF(center.x() + base * 0.88, center.y() + base * 0.14), QPointF(center.x() + base * 1.18, center.y() + base * 0.14)); break;
+    case 2: p.drawArc(QRectF(center.x() - base * 1.28, center.y() - base * 0.34, base * 0.30, base * 0.30), 270 * 16, 140 * 16); break;
+    case 3: p.drawArc(QRectF(center.x() + base * 0.98, center.y() - base * 0.24, base * 0.28, base * 0.28), 90 * 16, 140 * 16); break;
+    default: p.drawEllipse(QPointF(center.x() - base * 1.02, center.y() + base * 0.54), base * 0.07, base * 0.07); break;
+    }
+
     p.restore();
 }
 

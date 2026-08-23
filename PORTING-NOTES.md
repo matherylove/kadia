@@ -28,3 +28,10 @@ The one deliberate layout correction is the descriptive-panel collision seen in 
 ## Native-resolution correction
 
 The first C++ package treated 1280×720 as a virtual framebuffer and scaled the whole UI. That made CSS-pixel-sized UI elements too large on a 1080p monitor. The current port instead creates the QImage at the window's native client resolution and recalculates only the viewport-relative geometry. Fixed HTML pixel measurements remain fixed pixels, matching browser behavior much more closely.
+
+
+## Icon refresh
+
+- Tile icons are now drawn with a semantic vector icon system instead of generic glyph fallbacks.
+- Each option gets a unique icon signature derived from its section + label, so repeated labels across different sections no longer reuse the same exact icon.
+- Icons remain native `QPainter` geometry for Qt 5.6 / XP compatibility.
