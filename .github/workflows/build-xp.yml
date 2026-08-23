@@ -1,0 +1,168 @@
+name: Build Mathery Kadia XP
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Same XP-compatible static Qt archive used by the supplied Sightline project.
+  QT_ARCHIVE_URL: https://github.com/lighterowl/qt563xp/releases/download/1.2/Qt-5.6.3-Static-XP.7z
+  QT_ROOT: C:\Qt\5.6.3-Static-XP
+  VS2017_PATH: C:\BuildTools2017
+  BUILD_DIR: ${{ github.workspace }}\build
+
+jobs:
+  build:
+    name: Kadia.exe - Windows XP x86 / Direct3D 9
+    runs-on: windows-2022
+    timeout-minutes: 55
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Download Qt 5.6.3 XP static
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${env:QT_ARCHIVE_URL}" -OutFile "${env:RUNNER_TEMP}\qt-xp.7z"
+
+      - name: Extract Qt
+        shell: pwsh
+        run: |
+          if (Test-Path "${env:QT_ROOT}") { Remove-Item "${env:QT_ROOT}" -Recurse -Force }
+          New-Item -ItemType Directory -Path "C:\Qt" -Force | Out-Null
+          & "C:\Program Files\7-Zip\7z.exe" x "${env:RUNNER_TEMP}\qt-xp.7z" "-oC:\Qt" -y
+          $qmake = "${env:QT_ROOT}\bin\qmake.exe"
+          $spec = "${env:QT_ROOT}\mkspecs\win32-msvc2017\qmake.conf"
+          if (-not (Test-Path $qmake)) { throw "qmake.exe not found at $qmake" }
+          if (-not (Test-Path $spec)) { throw "qmake.conf not found at $spec" }
+          & $qmake -v
+
+      - name: Unpack FFmpeg runtime DLLs
+        shell: pwsh
+        run: |
+          $ffmpeg = Join-Path $env:GITHUB_WORKSPACE "third_party\ffmpeg"
+          if (-not (Test-Path $ffmpeg)) { throw "third_party/ffmpeg is missing" }
+
+          $patterns = @("*.7z", "*.7z.001", "*.zip")
+          $archives = @()
+          foreach ($pattern in $patterns) {
+            $archives += Get-ChildItem -Path $ffmpeg -Filter $pattern -Recurse -File -ErrorAction SilentlyContinue
+          }
+
+          foreach ($archive in $archives) {
+            if ($archive.Length -lt 1024) {
+              $head = Get-Content $archive.FullName -TotalCount 1 -ErrorAction SilentlyContinue
+              if ($head -like "version https://git-lfs*") {
+                throw "$($archive.Name) is a Git LFS pointer, not the real archive"
+              }
+              throw "$($archive.Name) is too small to be a usable archive"
+            }
+            Write-Host "Extracting $($archive.Name)"
+            & "C:\Program Files\7-Zip\7z.exe" x $archive.FullName "-o$ffmpeg" -y -bso0 -bsp0
+            if ($LASTEXITCODE -ne 0) { throw "7-Zip failed on $($archive.Name)" }
+          }
+
+          Get-ChildItem -Path $ffmpeg -Filter *.dll -Recurse -File |
+            Where-Object { $_.DirectoryName -ne $ffmpeg } |
+            ForEach-Object { Move-Item $_.FullName (Join-Path $ffmpeg $_.Name) -Force }
+
+          $required = @("avcodec-61.dll", "avformat-61.dll", "avutil-59.dll", "swscale-8.dll", "swresample-5.dll")
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $ffmpeg $_)) }
+          if ($missing) { throw "Missing FFmpeg runtime DLLs: $($missing -join ', ')" }
+
+      - name: Install Visual Studio 2017 XP build tools
+        shell: pwsh
+        run: |
+          $bootstrapper = "${env:RUNNER_TEMP}\vs_buildtools_2017.exe"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/15/release/vs_buildtools.exe" -OutFile $bootstrapper
+          $arguments = @(
+            "--quiet",
+            "--wait",
+            "--norestart",
+            "--nocache",
+            "--installPath", "${env:VS2017_PATH}",
+            "--add", "Microsoft.VisualStudio.Workload.VCTools",
+            "--add", "Microsoft.VisualStudio.Component.VC.v141.x86.x64",
+            "--add", "Microsoft.VisualStudio.Component.WinXP"
+          )
+          $process = Start-Process -FilePath $bootstrapper -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "VS 2017 Build Tools installer failed: $($process.ExitCode)" }
+
+      - name: Generate Makefile
+        shell: cmd
+        run: |
+          call "%VS2017_PATH%\VC\Auxiliary\Build\vcvarsall.bat" x86
+          if exist "%BUILD_DIR%" rmdir /S /Q "%BUILD_DIR%"
+          mkdir "%BUILD_DIR%"
+          cd /d "%BUILD_DIR%"
+          "%QT_ROOT%\bin\qmake.exe" -spec "%QT_ROOT%\mkspecs\win32-msvc2017" ..\Kadia.pro CONFIG+=release
+          if not exist Makefile exit /b 1
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "%VS2017_PATH%\VC\Auxiliary\Build\vcvarsall.bat" x86
+          cd /d "%BUILD_DIR%"
+          nmake
+
+      - name: Verify x86 and Windows XP subsystem
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path "${env:BUILD_DIR}" -Filter Kadia.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "Kadia.exe was not produced" }
+
+          $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $major = [BitConverter]::ToUInt16($bytes, $peOffset + 0x48)
+          $minor = [BitConverter]::ToUInt16($bytes, $peOffset + 0x4A)
+          Write-Host "Machine: 0x$($machine.ToString('X4'))  Subsystem: $major.$minor"
+          if ($machine -ne 0x014C) { throw "Expected x86 machine 0x014C" }
+          if ($major -ne 5 -or $minor -ne 1) { throw "Expected Windows subsystem 5.1, got $major.$minor" }
+
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $forbidden = @(
+            "GetTickCount64", "InitOnceExecuteOnce", "InitializeConditionVariable",
+            "SleepConditionVariableCS", "WakeAllConditionVariable",
+            "GetFileInformationByHandleEx", "GetSystemTimePreciseAsFileTime",
+            "InitializeCriticalSectionEx", "CreateThreadpoolTimer",
+            "SetFileInformationByHandle", "GetFinalPathNameByHandleW",
+            "AcquireSRWLockExclusive", "K32GetProcessMemoryInfo"
+          )
+          $hits = $forbidden | Where-Object { $ascii.Contains($_) }
+          if ($hits) {
+            Write-Host "::warning::Potential Vista-or-later API names found in the binary: $($hits -join ', ')"
+            Write-Host "::warning::This byte-string check is conservative; the Qt XP build may resolve some APIs dynamically."
+          }
+
+      - name: Stage release
+        shell: pwsh
+        run: |
+          $stage = "${env:GITHUB_WORKSPACE}\stage"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $exe = Get-ChildItem -Path "${env:BUILD_DIR}" -Filter Kadia.exe -Recurse | Select-Object -First 1
+          Copy-Item $exe.FullName "$stage\Kadia.exe"
+          Copy-Item "${env:GITHUB_WORKSPACE}\README.md" "$stage\README.txt"
+
+          $dlls = Get-ChildItem -Path "${env:GITHUB_WORKSPACE}\third_party\ffmpeg" -Filter *.dll -File
+          if ($dlls.Count -eq 0) { throw "No FFmpeg DLLs to stage" }
+          $dlls | ForEach-Object { Copy-Item $_.FullName $stage }
+
+          Get-ChildItem $stage -File | ForEach-Object {
+            Write-Host ("  {0,-24} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB))
+          }
+
+      - name: Upload XP build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mathery-Kadia-Windows-XP-x86
+          path: stage\**
+          if-no-files-found: error
