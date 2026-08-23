@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/assets">
+    <file alias="kadia_logo.argb">assets/kadia_logo.argb</file>
+    <file alias="kadia_logo.png">assets/kadia_logo.png</file>
+  </qresource>
+</RCC>
