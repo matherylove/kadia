@@ -6,6 +6,7 @@
 #include <QDesktopWidget>
 #include <QDir>
 #include <QFileInfo>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -122,6 +123,12 @@ static QStringList excludedScanRoots()
     addExcludedRoot(&roots, environmentPath("TMP"));
     addExcludedRoot(&roots, QStandardPaths::writableLocation(QStandardPaths::TempLocation));
 
+#ifdef Q_OS_WIN
+    const QString publicRoot = environmentPath("PUBLIC");
+    if (!publicRoot.isEmpty())
+        addExcludedRoot(&roots, QDir(publicRoot).filePath(QStringLiteral("Documents/WinDS PRO")));
+#endif
+
     roots.removeDuplicates();
     return roots;
 }
@@ -176,7 +183,8 @@ static bool isExcludedScanDirectory(const QString &directory,
 
     // AppData/Local Settings are excluded by folder name too so that profiles
     // belonging to other Windows users do not get exhaustively scanned.
-    if (name == QStringLiteral("appdata") || name == QStringLiteral("local settings"))
+    if (name == QStringLiteral("appdata") || name == QStringLiteral("local settings") ||
+        name == QStringLiteral("winds pro") || name == QStringLiteral("windspro"))
         return true;
 
     // Root-level operating-system/application directories are ignored even if
@@ -201,13 +209,21 @@ static bool isExcludedScanDirectory(const QString &directory,
 static QString styleSheet()
 {
     return QStringLiteral(
-        "QDialog { background:#070b12; color:#fff8e7; border:1px solid rgba(255,248,231,42); }"
+        "QDialog { background:transparent; }"
+        "QFrame#glassPanel {"
+        " background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(24,33,50,238), stop:0.52 rgba(10,16,28,230), stop:1 rgba(6,10,18,238));"
+        " border:1px solid rgba(255,248,231,54); border-radius:18px; }"
+        "QFrame#accentGlow { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(255,240,200,8), stop:0.18 rgba(255,240,200,120), stop:0.52 rgba(166,194,255,78), stop:1 rgba(166,194,255,0)); border:none; border-radius:3px; }"
         "QLabel { color:#fff8e7; background:transparent; }"
-        "QListWidget { background:#0b1019; color:#fff8e7; border:1px solid rgba(255,248,231,45); outline:none; }"
-        "QListWidget::item { padding:7px 10px; }"
-        "QListWidget::item:selected { background:#343842; color:#fff8e7; border:1px solid #9d978a; }"
-        "QPushButton { color:#fff8e7; background:#151b26; border:1px solid rgba(255,248,231,60); border-radius:4px; padding:7px 18px; }"
-        "QPushButton:focus { background:#252a34; border:1px solid #fff0c8; }");
+        "QLabel#dialogTitle { color:rgba(255,248,231,0.94); }"
+        "QLabel#dialogPath { color:rgba(255,248,231,0.68); }"
+        "QLabel#dialogHint { color:rgba(255,248,231,0.78); }"
+        "QListWidget { background:rgba(8,12,22,176); color:#fff8e7; border:1px solid rgba(255,248,231,46); border-radius:12px; outline:none; padding:5px; }"
+        "QListWidget::item { padding:7px 10px; margin:1px 0; border-radius:8px; }"
+        "QListWidget::item:selected { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(73,83,109,216), stop:1 rgba(34,42,61,216)); color:#fff8e7; border:1px solid rgba(255,240,200,138); }"
+        "QPushButton { color:#fff8e7; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(40,48,69,220), stop:1 rgba(18,24,37,220)); border:1px solid rgba(255,248,231,68); border-radius:12px; padding:8px 22px; min-width:104px; }"
+        "QPushButton:hover, QPushButton:focus { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(71,82,112,235), stop:1 rgba(26,34,54,230)); border:1px solid rgba(255,240,200,160); }"
+        "QPushButton:pressed { background:rgba(22,28,44,235); }" );
 }
 
 }
@@ -369,17 +385,66 @@ RomClassificationDialog::RomClassificationDialog(const QString &path, const QStr
       m_systems(new QListWidget(this)), m_confirm(new QPushButton(QStringLiteral("Confirm"), this)),
       m_later(new QPushButton(QStringLiteral("Later"), this)), m_input(this), m_inputTimer(new QTimer(this))
 {
-    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint); setModal(true); resize(720, 520); setStyleSheet(styleSheet());
-    QLabel *title = new QLabel(QStringLiteral("New ROM detected"), this); QFont tf=title->font(); tf.setPixelSize(28); tf.setWeight(QFont::Light); title->setFont(tf);
-    m_pathLabel->setText(QDir::toNativeSeparators(path)); m_pathLabel->setWordWrap(true);
-    m_hintLabel->setText(QStringLiteral("Detected hint: %1. Confirm the console, choose Unknown for ambiguous images, or None to discard this file permanently.").arg(hint)); m_hintLabel->setWordWrap(true);
+    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    setModal(true);
+    resize(760, 560);
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    setStyleSheet(styleSheet());
+
+    QLabel *title = new QLabel(QStringLiteral("New ROM detected"), this);
+    title->setObjectName(QStringLiteral("dialogTitle"));
+    QFont tf = title->font(); tf.setPixelSize(28); tf.setWeight(QFont::Light); title->setFont(tf);
+
+    m_pathLabel->setObjectName(QStringLiteral("dialogPath"));
+    m_pathLabel->setText(QDir::toNativeSeparators(path));
+    m_pathLabel->setWordWrap(true);
+    QFont pf = m_pathLabel->font(); pf.setPixelSize(12); m_pathLabel->setFont(pf);
+
+    m_hintLabel->setObjectName(QStringLiteral("dialogHint"));
+    m_hintLabel->setText(QStringLiteral("Detected hint: %1. Confirm the console, choose Unknown for ambiguous images, or None to discard this file permanently.").arg(hint));
+    m_hintLabel->setWordWrap(true);
+    QFont hf = m_hintLabel->font(); hf.setPixelSize(13); m_hintLabel->setFont(hf);
+
     m_systems->addItems(RomCatalog::systems());
-    int row=m_systems->findItems(hint,Qt::MatchFixedString).isEmpty()?1:m_systems->row(m_systems->findItems(hint,Qt::MatchFixedString).first()); m_systems->setCurrentRow(row);
-    QHBoxLayout *buttons=new QHBoxLayout; buttons->addStretch(); buttons->addWidget(m_confirm); buttons->addWidget(m_later);
-    QVBoxLayout *layout=new QVBoxLayout(this); layout->setContentsMargins(28,22,28,22); layout->setSpacing(10); layout->addWidget(title); layout->addWidget(m_pathLabel); layout->addWidget(m_hintLabel); layout->addWidget(m_systems,1); layout->addLayout(buttons);
-    connect(m_confirm,SIGNAL(clicked()),this,SLOT(confirmSelection())); connect(m_later,SIGNAL(clicked()),this,SLOT(deferSelection()));
-    m_input.initialize(); connect(m_inputTimer,SIGNAL(timeout()),this,SLOT(pollController())); m_inputTimer->start(16);
-    QRect target=parent?parent->frameGeometry():QApplication::desktop()->screenGeometry(QApplication::desktop()->primaryScreen()); move(target.center()-rect().center()); m_systems->setFocus();
+    QList<QListWidgetItem*> exact = m_systems->findItems(hint, Qt::MatchFixedString);
+    int row = exact.isEmpty() ? 1 : m_systems->row(exact.first());
+    m_systems->setCurrentRow(row);
+
+    QFrame *panel = new QFrame(this);
+    panel->setObjectName(QStringLiteral("glassPanel"));
+    QFrame *accent = new QFrame(panel);
+    accent->setObjectName(QStringLiteral("accentGlow"));
+    accent->setFixedHeight(6);
+
+    QHBoxLayout *buttons = new QHBoxLayout;
+    buttons->setSpacing(10);
+    buttons->addStretch();
+    buttons->addWidget(m_confirm);
+    buttons->addWidget(m_later);
+
+    QVBoxLayout *panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(26, 18, 26, 24);
+    panelLayout->setSpacing(10);
+    panelLayout->addWidget(accent);
+    panelLayout->addSpacing(4);
+    panelLayout->addWidget(title);
+    panelLayout->addWidget(m_pathLabel);
+    panelLayout->addWidget(m_hintLabel);
+    panelLayout->addWidget(m_systems, 1);
+    panelLayout->addLayout(buttons);
+
+    QVBoxLayout *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(panel);
+
+    connect(m_confirm, SIGNAL(clicked()), this, SLOT(confirmSelection()));
+    connect(m_later, SIGNAL(clicked()), this, SLOT(deferSelection()));
+    m_input.initialize();
+    connect(m_inputTimer, SIGNAL(timeout()), this, SLOT(pollController()));
+    m_inputTimer->start(16);
+    QRect target = parent ? parent->frameGeometry() : QApplication::desktop()->screenGeometry(QApplication::desktop()->primaryScreen());
+    move(target.center() - rect().center());
+    m_systems->setFocus();
 }
 
 QString RomClassificationDialog::selectedSystem() const { return m_selectedSystem; }
