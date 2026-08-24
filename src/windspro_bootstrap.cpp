@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QList>
@@ -40,6 +41,23 @@ static QString tempInstallerPath()
     QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
     if (dir.isEmpty()) dir = QDir::tempPath();
     return QDir(dir).filePath(QStringLiteral("WinDS_PRO_2026.08.22.exe"));
+}
+
+static QString bootstrapDialogStyle()
+{
+    return QStringLiteral(
+        "QDialog { background:transparent; }"
+        "QFrame#glassPanel { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(24,33,50,236), stop:0.50 rgba(10,16,28,228), stop:1 rgba(6,10,18,236)); border:1px solid rgba(255,248,231,54); border-radius:18px; }"
+        "QFrame#accentGlow { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(255,240,200,10), stop:0.18 rgba(255,240,200,115), stop:0.52 rgba(166,194,255,75), stop:1 rgba(166,194,255,0)); border:none; border-radius:3px; }"
+        "QLabel { background:transparent; color:#fff8e7; }"
+        "QLabel#dialogTitle { color:rgba(255,248,231,0.92); letter-spacing:2px; }"
+        "QLabel#dialogStatus { color:#fff8e7; }"
+        "QLabel#dialogDetail { color:rgba(255,248,231,0.72); }"
+        "QProgressBar { border:1px solid rgba(255,248,231,52); border-radius:8px; padding:1px; background:rgba(9,14,23,180); color:#fff8e7; text-align:center; min-height:20px; }"
+        "QProgressBar::chunk { border-radius:6px; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(117,131,168,230), stop:0.45 rgba(184,176,158,235), stop:1 rgba(255,240,200,250)); }"
+        "QPushButton { color:#fff8e7; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(40,48,69,220), stop:1 rgba(18,24,37,220)); border:1px solid rgba(255,248,231,68); border-radius:12px; padding:8px 22px; min-width:104px; }"
+        "QPushButton:hover, QPushButton:focus { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(71,82,112,235), stop:1 rgba(26,34,54,230)); border:1px solid rgba(255,240,200,160); }"
+        "QPushButton:pressed { background:rgba(22,28,44,235); }" );
 }
 
 #ifdef Q_OS_WIN
@@ -183,6 +201,15 @@ static bool runInstaller(const QString &path, QString *error)
 static QStringList likelyInstallPaths()
 {
     QStringList paths;
+
+    // WinDS PRO installs its shared emulator package under the Windows Public
+    // Documents tree.  Use %PUBLIC% instead of assuming the system drive is C:.
+    QString publicRoot = QString::fromLocal8Bit(qgetenv("PUBLIC"));
+    if (publicRoot.isEmpty())
+        publicRoot = QStringLiteral("C:/Users/Public");
+    paths << QDir(publicRoot).filePath(QStringLiteral("Documents/WinDS PRO"));
+
+    // Keep older/alternate locations as fallbacks for existing installations.
     paths << QStringLiteral("C:/ProgramData/WinDS PRO")
           << QStringLiteral("C:/ProgramData/winds pro");
     const QString pf = QString::fromLocal8Bit(qgetenv("ProgramFiles"));
@@ -190,6 +217,29 @@ static QStringList likelyInstallPaths()
     if (!pf.isEmpty()) paths << QDir(pf).filePath(QStringLiteral("WinDS PRO"));
     if (!pfx.isEmpty()) paths << QDir(pfx).filePath(QStringLiteral("WinDS PRO"));
     return paths;
+}
+
+static bool looksLikeWinDSProInstall(const QString &path)
+{
+    QDir d(path);
+    if (!d.exists())
+        return false;
+
+    // Some WinDS PRO releases do not place windspro.exe/windsprox.exe in the
+    // package root.  The canonical %PUBLIC%\Documents\WinDS PRO directory
+    // itself is therefore authoritative once it contains installed content.
+    QString publicRoot = QString::fromLocal8Bit(qgetenv("PUBLIC"));
+    if (publicRoot.isEmpty())
+        publicRoot = QStringLiteral("C:/Users/Public");
+    const QString publicInstall = QDir::cleanPath(
+        QDir(publicRoot).filePath(QStringLiteral("Documents/WinDS PRO")));
+    if (QDir::cleanPath(d.absolutePath()).compare(publicInstall, Qt::CaseInsensitive) == 0) {
+        const QStringList entries = d.entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+        return !entries.isEmpty();
+    }
+
+    return QFileInfo(d.filePath(QStringLiteral("windspro.exe"))).exists() ||
+           QFileInfo(d.filePath(QStringLiteral("windsprox.exe"))).exists();
 }
 
 static QString styleSheet()
@@ -240,14 +290,17 @@ WinDSProBootstrapDialog::WinDSProBootstrapDialog(QWidget *parent)
       m_close(new QPushButton(QStringLiteral("Close"), this)), m_installTimer(new QTimer(this)),
       m_inputTimer(new QTimer(this)), m_worker(0), m_input(this), m_installProgress(0), m_focusIndex(0)
 {
-    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint); setModal(true); setFixedSize(610, 270); setStyleSheet(styleSheet());
-    m_title->setText(QStringLiteral("MATHERY  Kadia!")); QFont tf = m_title->font(); tf.setPixelSize(22); tf.setWeight(QFont::Light); m_title->setFont(tf);
-    m_status->setText(QStringLiteral("Optional emulator package detected as missing")); QFont sf = m_status->font(); sf.setPixelSize(18); m_status->setFont(sf);
-    m_detail->setText(QStringLiteral("WinDS PRO 2026.08.22 was not detected. Kadia can download the official package once and install it silently. You can skip this offer; Kadia will not ask again.")); m_detail->setWordWrap(true);
+    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint); setModal(true); setFixedSize(640, 300); setAttribute(Qt::WA_TranslucentBackground, true); setStyleSheet(bootstrapDialogStyle());
+    m_title->setObjectName(QStringLiteral("dialogTitle")); m_status->setObjectName(QStringLiteral("dialogStatus")); m_detail->setObjectName(QStringLiteral("dialogDetail"));
+    m_title->setText(QStringLiteral("MATHERY   Kadia!")); QFont tf = m_title->font(); tf.setPixelSize(25); tf.setLetterSpacing(QFont::AbsoluteSpacing, 1.2); tf.setWeight(QFont::DemiBold); m_title->setFont(tf);
+    m_status->setText(QStringLiteral("Optional emulator package detected as missing")); QFont sf = m_status->font(); sf.setPixelSize(23); sf.setWeight(QFont::Light); m_status->setFont(sf);
+    m_detail->setText(QStringLiteral("WinDS PRO 2026.08.22 was not detected. Kadia can download the official package once and install it silently. You can skip this offer; Kadia will not ask again.")); m_detail->setWordWrap(true); QFont df = m_detail->font(); df.setPixelSize(13); m_detail->setFont(df);
     m_progress->setRange(0,100); m_progress->setValue(0); m_progress->hide();
     m_retry->hide(); m_close->hide();
-    QHBoxLayout *buttons = new QHBoxLayout; buttons->addStretch(); buttons->addWidget(m_install); buttons->addWidget(m_skip); buttons->addWidget(m_retry); buttons->addWidget(m_close);
-    QVBoxLayout *layout = new QVBoxLayout(this); layout->setContentsMargins(28,22,28,22); layout->setSpacing(10); layout->addWidget(m_title); layout->addWidget(m_status); layout->addWidget(m_detail); layout->addWidget(m_progress); layout->addStretch(); layout->addLayout(buttons);
+    QFrame *panel = new QFrame(this); panel->setObjectName(QStringLiteral("glassPanel")); QFrame *accent = new QFrame(panel); accent->setObjectName(QStringLiteral("accentGlow")); accent->setFixedHeight(6);
+    QHBoxLayout *buttons = new QHBoxLayout; buttons->setSpacing(10); buttons->addStretch(); buttons->addWidget(m_install); buttons->addWidget(m_skip); buttons->addWidget(m_retry); buttons->addWidget(m_close);
+    QVBoxLayout *panelLayout = new QVBoxLayout(panel); panelLayout->setContentsMargins(26,18,26,24); panelLayout->setSpacing(10); panelLayout->addWidget(accent); panelLayout->addSpacing(4); panelLayout->addWidget(m_title); panelLayout->addWidget(m_status); panelLayout->addWidget(m_detail); panelLayout->addSpacing(6); panelLayout->addWidget(m_progress); panelLayout->addStretch(); panelLayout->addLayout(buttons);
+    QVBoxLayout *layout = new QVBoxLayout(this); layout->setContentsMargins(0,0,0,0); layout->addWidget(panel);
     connect(m_install,SIGNAL(clicked()),this,SLOT(startInstall())); connect(m_skip,SIGNAL(clicked()),this,SLOT(skipInstall()));
     connect(m_retry,SIGNAL(clicked()),this,SLOT(startInstall())); connect(m_close,SIGNAL(clicked()),this,SLOT(reject()));
     connect(m_installTimer,SIGNAL(timeout()),this,SLOT(animateInstallProgress())); m_installTimer->setInterval(280);
@@ -289,7 +342,7 @@ bool isInstalled(QString *location)
         << QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall")
         << QStringLiteral("HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall");
     for (int r=0;r<roots.size();++r){QSettings root(roots[r],QSettings::NativeFormat);const QStringList groups=root.childGroups();for(int i=0;i<groups.size();++i){root.beginGroup(groups[i]);const QString name=root.value(QStringLiteral("DisplayName")).toString();const QString loc=root.value(QStringLiteral("InstallLocation")).toString();root.endGroup();if(name.contains(QStringLiteral("WinDS PRO"),Qt::CaseInsensitive)){if(location)*location=loc;return true;}}}
-    const QStringList paths=likelyInstallPaths();for(int i=0;i<paths.size();++i){QDir d(paths[i]);if(d.exists()&&(QFileInfo(d.filePath(QStringLiteral("windspro.exe"))).exists()||QFileInfo(d.filePath(QStringLiteral("windsprox.exe"))).exists())){if(location)*location=d.absolutePath();return true;}}
+    const QStringList paths=likelyInstallPaths();for(int i=0;i<paths.size();++i){if(looksLikeWinDSProInstall(paths[i])){if(location)*location=QDir(paths[i]).absolutePath();return true;}}
 #else
     Q_UNUSED(location);
 #endif

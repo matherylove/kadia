@@ -1,10 +1,10 @@
 #include "rom_scanner.h"
 
 #include <QApplication>
+#include <QByteArray>
 #include <QCryptographicHash>
 #include <QDesktopWidget>
 #include <QDir>
-#include <QDirIterator>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -67,6 +67,135 @@ static QString hintForSuffix(const QString &suffix)
 static bool candidateSuffix(const QString &suffix)
 {
     return !hintForSuffix(suffix).isEmpty();
+}
+
+static QString normalizedScanPath(const QString &path)
+{
+    QString p = QDir::cleanPath(QDir::fromNativeSeparators(path));
+    while (p.length() > 3 && p.endsWith(QLatin1Char('/')))
+        p.chop(1);
+#ifdef Q_OS_WIN
+    p = p.toLower();
+#endif
+    return p;
+}
+
+static void addExcludedRoot(QStringList *roots, const QString &path)
+{
+    if (!roots || path.trimmed().isEmpty())
+        return;
+    const QString normalized = normalizedScanPath(path);
+    if (!normalized.isEmpty() && !roots->contains(normalized))
+        roots->append(normalized);
+}
+
+static QString environmentPath(const char *name)
+{
+    const QByteArray value = qgetenv(name);
+    if (value.isEmpty())
+        return QString();
+    return QDir::fromNativeSeparators(QString::fromLocal8Bit(value));
+}
+
+static QStringList excludedScanRoots()
+{
+    QStringList roots;
+
+    // Operating-system and application locations.  These paths contain many
+    // BIN/IMG/ROM-looking support files which are not game images and used to
+    // generate large numbers of false positives.
+    addExcludedRoot(&roots, environmentPath("WINDIR"));
+    addExcludedRoot(&roots, environmentPath("SystemRoot"));
+    addExcludedRoot(&roots, environmentPath("ProgramFiles"));
+    addExcludedRoot(&roots, environmentPath("ProgramFiles(x86)"));
+    addExcludedRoot(&roots, environmentPath("ProgramW6432"));
+    addExcludedRoot(&roots, environmentPath("CommonProgramFiles"));
+    addExcludedRoot(&roots, environmentPath("CommonProgramFiles(x86)"));
+    addExcludedRoot(&roots, environmentPath("ProgramData"));
+
+    // User/application caches are also poor ROM search locations.  Do not
+    // exclude the user profile itself: Downloads, Documents, Desktop, etc. are
+    // intentionally still scanned.
+    addExcludedRoot(&roots, environmentPath("APPDATA"));
+    addExcludedRoot(&roots, environmentPath("LOCALAPPDATA"));
+    addExcludedRoot(&roots, environmentPath("TEMP"));
+    addExcludedRoot(&roots, environmentPath("TMP"));
+    addExcludedRoot(&roots, QStandardPaths::writableLocation(QStandardPaths::TempLocation));
+
+    roots.removeDuplicates();
+    return roots;
+}
+
+static bool isSameOrBelow(const QString &path, const QString &root)
+{
+    if (root.isEmpty())
+        return false;
+    if (path == root)
+        return true;
+    QString prefix = root;
+    if (!prefix.endsWith(QLatin1Char('/')))
+        prefix += QLatin1Char('/');
+    return path.startsWith(prefix);
+}
+
+static bool isExcludedScanDirectory(const QString &directory,
+                                    const QString &driveRoot,
+                                    const QStringList &excludedRoots)
+{
+    const QString path = normalizedScanPath(directory);
+    const QString root = normalizedScanPath(driveRoot);
+    if (path.isEmpty() || path == root)
+        return false;
+
+    for (int i = 0; i < excludedRoots.size(); ++i) {
+        if (isSameOrBelow(path, excludedRoots[i]))
+            return true;
+    }
+
+    const QFileInfo fi(directory);
+#ifdef Q_OS_WIN
+    const QString name = fi.fileName().toLower();
+#else
+    const QString name = fi.fileName();
+#endif
+
+    // Never descend into Windows-managed metadata/cache trees, regardless of
+    // which drive they live on.  This also covers secondary drives where
+    // Windows creates $RECYCLE.BIN, System Volume Information, WindowsApps,
+    // recovery data, and similar folders.
+    static const char *const blockedNames[] = {
+        "$recycle.bin", "recycler", "recycled", "system volume information",
+        "windowsapps", "wpsystem", "wudownloadcache", "recovery", "msocache",
+        "config.msi", "$winreagent", "$windows.~bt", "$windows.~ws",
+        "$getcurrent", "$sysreset", "esd"
+    };
+    for (unsigned int i = 0; i < sizeof(blockedNames) / sizeof(blockedNames[0]); ++i) {
+        if (name == QString::fromLatin1(blockedNames[i]))
+            return true;
+    }
+
+    // AppData/Local Settings are excluded by folder name too so that profiles
+    // belonging to other Windows users do not get exhaustively scanned.
+    if (name == QStringLiteral("appdata") || name == QStringLiteral("local settings"))
+        return true;
+
+    // Root-level operating-system/application directories are ignored even if
+    // environment variables point to a different Windows installation.
+    const QDir rootDir(driveRoot);
+    const QString parent = normalizedScanPath(fi.absolutePath());
+    if (parent == normalizedScanPath(rootDir.absolutePath())) {
+        static const char *const blockedRootNames[] = {
+            "windows", "windows.old", "program files", "program files (x86)",
+            "programdata", "perflogs", "boot", "steam library", "steamlibrary",
+            "epic games", "ea games", "gog games", "xboxgames"
+        };
+        for (unsigned int i = 0; i < sizeof(blockedRootNames) / sizeof(blockedRootNames[0]); ++i) {
+            if (name == QString::fromLatin1(blockedRootNames[i]))
+                return true;
+        }
+    }
+
+    return false;
 }
 
 static QString styleSheet()
@@ -186,16 +315,50 @@ void RomScanner::requestStop(){ m_stop = true; }
 void RomScanner::run()
 {
     const QFileInfoList drives = QDir::drives();
+    const QStringList excludedRoots = excludedScanRoots();
+
     for (int d = 0; d < drives.size() && !m_stop; ++d) {
         const QString root = drives[d].absoluteFilePath();
         emit scanStatus(QStringLiteral("Scanning %1 for ROM files...").arg(QDir::toNativeSeparators(root)));
-        QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot | QDir::Readable, QDirIterator::Subdirectories);
-        while (it.hasNext() && !m_stop) {
-            const QString path = it.next();
-            const QFileInfo fi = it.fileInfo();
-            if (!candidateSuffix(fi.suffix())) continue;
-            if (RomCatalog::isKnown(path)) continue;
-            emit romDiscovered(path, hintForSuffix(fi.suffix()));
+
+        // Use an explicit directory stack instead of QDirIterator::Subdirectories.
+        // QDirIterator cannot prune a subtree after entering it, while the stack
+        // lets Kadia completely avoid Windows, Program Files, caches, recycle
+        // bins, recovery data, etc.
+        QStringList pending;
+        pending << root;
+
+        while (!pending.isEmpty() && !m_stop) {
+            const QString directory = pending.takeLast();
+            if (isExcludedScanDirectory(directory, root, excludedRoots))
+                continue;
+
+            QDir dir(directory);
+            const QFileInfoList entries = dir.entryInfoList(
+                QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Readable,
+                QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
+
+            for (int i = 0; i < entries.size() && !m_stop; ++i) {
+                const QFileInfo &fi = entries[i];
+
+                if (fi.isDir()) {
+                    // Do not follow symlinks/junction-like entries into another
+                    // part of the filesystem; this avoids duplicate scans and
+                    // recursive directory cycles.
+                    if (!fi.isSymLink() &&
+                        !isExcludedScanDirectory(fi.absoluteFilePath(), root, excludedRoots))
+                        pending << fi.absoluteFilePath();
+                    continue;
+                }
+
+                if (!fi.isFile() || !candidateSuffix(fi.suffix()))
+                    continue;
+
+                const QString path = fi.absoluteFilePath();
+                if (RomCatalog::isKnown(path))
+                    continue;
+                emit romDiscovered(path, hintForSuffix(fi.suffix()));
+            }
         }
     }
     emit scanFinished();

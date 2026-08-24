@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QList>
@@ -36,6 +37,25 @@ static QString tempInstallerPath(const QString &fileName)
     if (dir.isEmpty())
         dir = QDir::tempPath();
     return QDir(dir).filePath(fileName);
+}
+
+static QString bootstrapDialogStyle()
+{
+    return QStringLiteral(
+        "QDialog { background:transparent; }"
+        "QFrame#glassPanel {"
+        " background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(25,34,52,236), stop:0.52 rgba(10,16,28,228), stop:1 rgba(6,10,18,236));"
+        " border:1px solid rgba(255,248,231,54); border-radius:18px; }"
+        "QFrame#accentGlow { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(255,240,200,10), stop:0.16 rgba(255,240,200,105), stop:0.45 rgba(166,194,255,70), stop:1 rgba(166,194,255,0)); border:none; border-radius:3px; }"
+        "QLabel { background:transparent; color:#fff8e7; }"
+        "QLabel#dialogTitle { color:rgba(255,248,231,0.92); letter-spacing:2px; }"
+        "QLabel#dialogStatus { color:#fff8e7; }"
+        "QLabel#dialogDetail { color:rgba(255,248,231,0.72); }"
+        "QProgressBar { border:1px solid rgba(255,248,231,52); border-radius:8px; padding:1px; background:rgba(9,14,23,180); color:#fff8e7; text-align:center; min-height:20px; }"
+        "QProgressBar::chunk { border-radius:6px; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(117,131,168,230), stop:0.45 rgba(184,176,158,235), stop:1 rgba(255,240,200,250)); }"
+        "QPushButton { color:#fff8e7; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(40,48,69,220), stop:1 rgba(18,24,37,220)); border:1px solid rgba(255,248,231,68); border-radius:12px; padding:8px 22px; min-width:104px; }"
+        "QPushButton:hover, QPushButton:focus { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(71,82,112,235), stop:1 rgba(26,34,54,230)); border:1px solid rgba(255,240,200,160); }"
+        "QPushButton:pressed { background:rgba(22,28,44,235); }" );
 }
 
 static bool sha256Matches(const QString &fileName, const QByteArray &expected, QString *error)
@@ -296,22 +316,31 @@ KLiteBootstrapDialog::KLiteBootstrapDialog(const KLitePackageInfo &package, QWid
     setWindowTitle(QStringLiteral("Mathery Kadia! - Required media components"));
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     setModal(true);
-    setFixedSize(560, 230);
-    setAttribute(Qt::WA_TranslucentBackground, false);
+    setFixedSize(590, 268);
+    setAttribute(Qt::WA_TranslucentBackground, true);
 
-    m_title->setText(QStringLiteral("MATHERY  Kadia!"));
+    m_title->setObjectName(QStringLiteral("dialogTitle"));
+    m_status->setObjectName(QStringLiteral("dialogStatus"));
+    m_detail->setObjectName(QStringLiteral("dialogDetail"));
+
+    m_title->setText(QStringLiteral("MATHERY   Kadia!"));
     QFont titleFont = m_title->font();
-    titleFont.setPixelSize(24);
-    titleFont.setWeight(QFont::Light);
+    titleFont.setPixelSize(25);
+    titleFont.setLetterSpacing(QFont::AbsoluteSpacing, 1.2);
+    titleFont.setWeight(QFont::DemiBold);
     m_title->setFont(titleFont);
 
     m_status->setText(QStringLiteral("K-Lite Codec Pack Full is required"));
     QFont statusFont = m_status->font();
-    statusFont.setPixelSize(17);
+    statusFont.setPixelSize(23);
+    statusFont.setWeight(QFont::Light);
     m_status->setFont(statusFont);
 
     m_detail->setText(QStringLiteral("The required codec pack was not found. Kadia will download and install the compatible Full edition automatically."));
     m_detail->setWordWrap(true);
+    QFont detailFont = m_detail->font();
+    detailFont.setPixelSize(13);
+    m_detail->setFont(detailFont);
 
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
@@ -321,28 +350,36 @@ KLiteBootstrapDialog::KLiteBootstrapDialog(const KLitePackageInfo &package, QWid
     m_retry->hide();
     m_exit->hide();
 
+    QFrame *panel = new QFrame(this);
+    panel->setObjectName(QStringLiteral("glassPanel"));
+    QFrame *accent = new QFrame(panel);
+    accent->setObjectName(QStringLiteral("accentGlow"));
+    accent->setFixedHeight(6);
+
     QHBoxLayout *buttons = new QHBoxLayout;
+    buttons->setSpacing(10);
     buttons->addStretch();
     buttons->addWidget(m_retry);
     buttons->addWidget(m_exit);
 
-    QVBoxLayout *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(28, 22, 28, 22);
-    layout->setSpacing(10);
-    layout->addWidget(m_title);
-    layout->addWidget(m_status);
-    layout->addWidget(m_detail);
-    layout->addSpacing(5);
-    layout->addWidget(m_progress);
-    layout->addLayout(buttons);
+    QVBoxLayout *panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(26, 18, 26, 24);
+    panelLayout->setSpacing(10);
+    panelLayout->addWidget(accent);
+    panelLayout->addSpacing(4);
+    panelLayout->addWidget(m_title);
+    panelLayout->addWidget(m_status);
+    panelLayout->addWidget(m_detail);
+    panelLayout->addSpacing(6);
+    panelLayout->addWidget(m_progress);
+    panelLayout->addSpacing(4);
+    panelLayout->addLayout(buttons);
 
-    setStyleSheet(QStringLiteral(
-        "QDialog { background:#070b12; color:#fff8e7; border:1px solid rgba(255,248,231,38); }"
-        "QLabel { color:#fff8e7; background:transparent; }"
-        "QProgressBar { border:1px solid rgba(255,248,231,55); border-radius:5px; background:#10151f; color:#fff8e7; text-align:center; min-height:18px; }"
-        "QProgressBar::chunk { border-radius:4px; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #746f65, stop:0.55 #b8b09e, stop:1 #fff0c8); }"
-        "QPushButton { color:#fff8e7; background:#151b26; border:1px solid rgba(255,248,231,60); border-radius:4px; padding:6px 18px; }"
-        "QPushButton:hover { background:#202838; }"));
+    QVBoxLayout *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(panel);
+
+    setStyleSheet(bootstrapDialogStyle());
 
     connect(m_retry, SIGNAL(clicked()), this, SLOT(startInstall()));
     connect(m_exit, SIGNAL(clicked()), this, SLOT(reject()));
