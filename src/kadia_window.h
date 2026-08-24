@@ -5,6 +5,8 @@
 #include <QTimer>
 #include <QWidget>
 #include <QRect>
+#include <QQueue>
+#include <QPair>
 
 #include "d3d9_renderer.h"
 #include "input_manager.h"
@@ -12,6 +14,7 @@
 
 class QMouseEvent;
 class QWheelEvent;
+class RomScanner;
 
 class KadiaWindow : public QWidget
 {
@@ -22,6 +25,9 @@ public:
 
     void showOnPrimaryMonitor();
     void showWindowed();
+
+public slots:
+    void runPostStartupChecks();
 
 protected:
     void paintEvent(QPaintEvent *event) Q_DECL_OVERRIDE;
@@ -36,10 +42,13 @@ protected:
 
 private slots:
     void frameTick();
+    void onRomDiscovered(const QString &path, const QString &hint);
+    void showNextRomDialog();
 
 private:
     void ensureRenderer();
     void dispatch(InputManager::Action action);
+    void processSceneCommands();
 
     D3D9Renderer m_renderer;
     InputManager m_input;
@@ -51,4 +60,7 @@ private:
     bool m_closing;
     bool m_monitorMode;
     QRect m_windowedGeometry;
+    RomScanner *m_romScanner;
+    QQueue<QPair<QString, QString> > m_romQueue;
+    bool m_romDialogActive;
 };

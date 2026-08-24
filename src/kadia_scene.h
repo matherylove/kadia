@@ -24,6 +24,11 @@ public:
         Back
     };
 
+    enum Command {
+        NoCommand,
+        OpenBackgroundSettings
+    };
+
     KadiaScene();
 
     QSize logicalSize() const;
@@ -34,6 +39,9 @@ public:
     void handle(Action action);
     void cycleWordmarkFont();
     void setControllerConnected(bool connected);
+    void setBackgroundImage(const QImage &image);
+    void setBackgroundOpacity(qreal opacity);
+    Command takePendingCommand();
 
     bool inLibrary() const;
     QString selectedSectionName() const;
@@ -104,6 +112,9 @@ private:
     QSize m_viewportSize;
     QImage m_logo;
     QImage m_logoWhite;
+    QImage m_backgroundImage;
+    qreal m_backgroundOpacity;
+    Command m_pendingCommand;
     QVector<Star> m_stars;
     std::mt19937 m_rng;
 

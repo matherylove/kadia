@@ -35,3 +35,8 @@ The first C++ package treated 1280×720 as a virtual framebuffer and scaled the 
 - Tile icons are now drawn with a semantic vector icon system instead of generic glyph fallbacks.
 - Each option gets a unique icon signature derived from its section + label, so repeated labels across different sections no longer reuse the same exact icon.
 - Icons remain native `QPainter` geometry for Qt 5.6 / XP compatibility.
+
+
+## Codec prerequisite bootstrap
+
+`src/klite_bootstrap.*` is deliberately separate from the D3D9 UI path. It checks `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\KLiteCodecPack_is1` (including the WOW6432Node view), downloads only from Codec Guide, verifies a pinned SHA-256, and runs the official Inno Setup package in silent mode before `KadiaWindow` is constructed.

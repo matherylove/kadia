@@ -16,3 +16,8 @@ The workflow verifies the output PE machine type (`0x014C`) and subsystem versio
 Kadia does not depend on Qt's OpenGL/ANGLE choice. The renderer uses `Direct3DCreate9` directly. This avoids ambiguity about whether a particular Qt build selected desktop OpenGL, ANGLE D3D9 or ANGLE D3D11.
 
 The UI is rendered directly into a BGRA frame matching the current client size. In the default mode that client size is the full primary-monitor geometry, while all HTML CSS-pixel metrics stay at their original size. The same-size frame is copied into a D3D9 `X8R8G8B8` offscreen surface and presented with `D3DPRESENT_INTERVAL_ONE`, so delivery is synchronized to the desktop refresh rate instead of a fixed 60 Hz timer.
+
+
+## K-Lite runtime prerequisite
+
+The executable links `wininet`, `shell32`, and `advapi32` for the startup prerequisite bootstrap. No QtNetwork/OpenSSL dependency was added. The XP code path downloads the official 13.8.5 Full installer and verifies SHA-256 `13f31319251a808d0489d54ff69e30f2d4672bd8e668d071ca47ab3433d9d6f1` before executing it. Windows XP SP3 is the intended XP runtime baseline for this dependency.

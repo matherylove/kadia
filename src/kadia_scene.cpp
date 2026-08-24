@@ -72,6 +72,8 @@ static QColor withAlpha(const QColor &c, int alpha)
 
 KadiaScene::KadiaScene()
     : m_viewportSize(1280, 720)
+    , m_backgroundOpacity(1.0)
+    , m_pendingCommand(NoCommand)
     , m_rng(0x4B414449u)
     , m_category(0)
     , m_tile(0)
@@ -230,6 +232,10 @@ void KadiaScene::handle(Action action)
     if (action == Accept) {
         const QString section = sections[m_category].name;
         const QString selected = tiles[m_tile].label;
+        if (selected == QStringLiteral("Background")) {
+            m_pendingCommand = OpenBackgroundSettings;
+            return;
+        }
         const bool gameBrowse = section == QStringLiteral("Games") ||
                                 section == QStringLiteral("Consoles") ||
                                 section == QStringLiteral("Handhelds") ||
@@ -261,6 +267,23 @@ void KadiaScene::cycleWordmarkFont()
 void KadiaScene::setControllerConnected(bool connected)
 {
     m_controllerConnected = connected;
+}
+
+void KadiaScene::setBackgroundImage(const QImage &image)
+{
+    m_backgroundImage = image;
+}
+
+void KadiaScene::setBackgroundOpacity(qreal opacity)
+{
+    m_backgroundOpacity = qBound<qreal>(0.0, opacity, 1.0);
+}
+
+KadiaScene::Command KadiaScene::takePendingCommand()
+{
+    const Command command = m_pendingCommand;
+    m_pendingCommand = NoCommand;
+    return command;
 }
 
 bool KadiaScene::inLibrary() const
@@ -482,6 +505,23 @@ void KadiaScene::drawFrame(QPainter &p)
     base.setColorAt(0.74, QColor(9, 13, 21));
     base.setColorAt(1.0, QColor(5, 7, 13));
     p.fillRect(frameRect(), base);
+
+    if (!m_backgroundImage.isNull() && m_backgroundOpacity > 0.001) {
+        const QRectF target = frameRect();
+        const QSizeF imageSize = m_backgroundImage.size();
+        const qreal sx = target.width() / imageSize.width();
+        const qreal sy = target.height() / imageSize.height();
+        const qreal scale = qMax(sx, sy);
+        const qreal sourceW = target.width() / scale;
+        const qreal sourceH = target.height() / scale;
+        const QRectF source((imageSize.width() - sourceW) * 0.5,
+                            (imageSize.height() - sourceH) * 0.5,
+                            sourceW, sourceH);
+        p.save();
+        p.setOpacity(m_backgroundOpacity);
+        p.drawImage(target, m_backgroundImage, source);
+        p.restore();
+    }
 
     drawVistaBackground(p);
     drawStarfield(p);

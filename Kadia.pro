@@ -31,13 +31,13 @@ INCLUDEPATH += $$FFMPEG_DIR/include
 win32-msvc* {
     LIBS += -L$$FFMPEG_DIR/lib \
         -lavcodec -lavformat -lavutil -lswscale -lswresample \
-        -ld3d9 -lole32 -luser32 -lgdi32
+        -ld3d9 -lole32 -luser32 -lgdi32 -lgdiplus -lwininet -lshell32 -ladvapi32
 }
 
 win32-g++ {
     LIBS += -L$$FFMPEG_DIR/lib \
         -lavcodec -lavformat -lavutil -lswscale -lswresample \
-        -ld3d9 -lole32 -luser32 -lgdi32
+        -ld3d9 -lole32 -luser32 -lgdi32 -lgdiplus -lwininet -lshell32 -ladvapi32
 }
 
 SOURCES += \
@@ -47,6 +47,11 @@ SOURCES += \
     src/d3d9_renderer.cpp \
     src/input_manager.cpp \
     src/ffmpeg_runtime.cpp \
+    src/klite_bootstrap.cpp \
+    src/windspro_bootstrap.cpp \
+    src/store_detector.cpp \
+    src/background_settings.cpp \
+    src/rom_scanner.cpp \
     src/ui_model.cpp
 
 HEADERS += \
@@ -55,6 +60,11 @@ HEADERS += \
     src/d3d9_renderer.h \
     src/input_manager.h \
     src/ffmpeg_runtime.h \
+    src/klite_bootstrap.h \
+    src/windspro_bootstrap.h \
+    src/store_detector.h \
+    src/background_settings.h \
+    src/rom_scanner.h \
     src/ui_model.h
 
 RESOURCES += resources.qrc

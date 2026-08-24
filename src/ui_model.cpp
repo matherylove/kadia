@@ -1,8 +1,45 @@
 #include "ui_model.h"
+#include <QDir>
+#include <QFileInfo>
+
+namespace {
+QStringList &detectedStoresStorage()
+{
+    static QStringList stores;
+    return stores;
+}
+QStringList &unknownRomsStorage()
+{
+    static QStringList paths;
+    return paths;
+}
+}
+
+void setKadiaDetectedStores(const QStringList &stores)
+{
+    QStringList clean = stores;
+    clean.removeDuplicates();
+    clean.sort(Qt::CaseInsensitive);
+    detectedStoresStorage() = clean;
+}
+
+QStringList kadiaDetectedStores()
+{
+    return detectedStoresStorage();
+}
+
+void setKadiaUnknownRoms(const QStringList &paths)
+{
+    QStringList clean = paths;
+    clean.removeDuplicates();
+    clean.sort(Qt::CaseInsensitive);
+    unknownRomsStorage() = clean;
+}
+
 
 const QVector<KadiaSectionInfo> &kadiaSections()
 {
-    static const QVector<KadiaSectionInfo> data = {
+    static const QVector<KadiaSectionInfo> baseData = {
         { QStringLiteral("Home"), QStringLiteral("Games, media and entertainment"), {
             { QStringLiteral("Continue"), QStringLiteral(""), QStringLiteral("Continue"), QStringLiteral("Resume something you recently played or watched.") },
             { QStringLiteral("All Games"), QStringLiteral(""), QStringLiteral("All Games"), QStringLiteral("Browse the complete game library across every configured system.") },
@@ -58,6 +95,8 @@ const QVector<KadiaSectionInfo> &kadiaSections()
             { QStringLiteral("GOG"), QStringLiteral(""), QStringLiteral("GOG"), QStringLiteral("Games detected from GOG.") },
             { QStringLiteral("EA"), QStringLiteral(""), QStringLiteral("EA Games"), QStringLiteral("Games detected from the EA app.") },
             { QStringLiteral("Amazon"), QStringLiteral(""), QStringLiteral("Amazon Games"), QStringLiteral("Games detected from Amazon Games.") },
+            { QStringLiteral("Ubisoft"), QStringLiteral(""), QStringLiteral("Ubisoft Connect"), QStringLiteral("Games detected from Ubisoft Connect.") },
+            { QStringLiteral("Battle.net"), QStringLiteral(""), QStringLiteral("Battle.net"), QStringLiteral("Games detected from Battle.net.") },
         } },
         { QStringLiteral("Collections"), QStringLiteral("Automatic and custom collections"), {
             { QStringLiteral("All Games"), QStringLiteral(""), QStringLiteral("All Games"), QStringLiteral("Automatic collection containing every visible game.") },
@@ -71,6 +110,8 @@ const QVector<KadiaSectionInfo> &kadiaSections()
             { QStringLiteral("Vertical"), QStringLiteral(""), QStringLiteral("Vertical Games"), QStringLiteral("Automatic vertical-screen collection.") },
             { QStringLiteral("Lightgun"), QStringLiteral(""), QStringLiteral("Lightgun Games"), QStringLiteral("Automatic lightgun collection.") },
             { QStringLiteral("Custom"), QStringLiteral(""), QStringLiteral("Custom Collections"), QStringLiteral("Editable and dynamic collections created by the user.") },
+        } },
+        { QStringLiteral("Unknowns"), QStringLiteral("ROM images awaiting identification"), {
         } },
         { QStringLiteral("Recent"), QStringLiteral("Jump back in"), {
             { QStringLiteral("Aero Quest"), QStringLiteral(""), QStringLiteral("Aero Quest"), QStringLiteral("Played 18 minutes ago.") },
@@ -176,6 +217,7 @@ const QVector<KadiaSectionInfo> &kadiaSections()
         } },
         { QStringLiteral("Interface Settings"), QStringLiteral("Appearance and navigation"), {
             { QStringLiteral("Theme"), QStringLiteral(""), QStringLiteral("Theme"), QStringLiteral("Choose the interface theme.") },
+            { QStringLiteral("Background"), QStringLiteral(""), QStringLiteral("Background"), QStringLiteral("Choose the Kadia background, desktop wallpaper translucency and image opacity.") },
             { QStringLiteral("Theme Config"), QStringLiteral(""), QStringLiteral("Theme Configuration"), QStringLiteral("Configure options exposed by the active theme.") },
             { QStringLiteral("Transitions"), QStringLiteral(""), QStringLiteral("Transitions"), QStringLiteral("Choose interface transition behavior.") },
             { QStringLiteral("Show Clock"), QStringLiteral(""), QStringLiteral("Show Clock"), QStringLiteral("Show or hide the interface clock.") },
@@ -269,7 +311,54 @@ const QVector<KadiaSectionInfo> &kadiaSections()
             { QStringLiteral("Cancel"), QStringLiteral(""), QStringLiteral("Cancel"), QStringLiteral("Return to the previous menu.") },
         } },
     };
-    return data;
+
+    static QVector<KadiaSectionInfo> filtered;
+    static QString lastStoreKey;
+    static QString lastUnknownKey;
+    const QString currentStoreKey = detectedStoresStorage().join(QStringLiteral("|"));
+    const QString currentUnknownKey = unknownRomsStorage().join(QStringLiteral("|"));
+    if (filtered.isEmpty() || currentStoreKey != lastStoreKey || currentUnknownKey != lastUnknownKey) {
+        filtered = baseData;
+        lastStoreKey = currentStoreKey;
+        lastUnknownKey = currentUnknownKey;
+        const QStringList storeLabels = QStringList()
+            << QStringLiteral("Steam") << QStringLiteral("Epic") << QStringLiteral("GOG")
+            << QStringLiteral("EA") << QStringLiteral("Amazon") << QStringLiteral("Ubisoft")
+            << QStringLiteral("Battle.net");
+        for (int sidx = 0; sidx < filtered.size(); ++sidx) {
+            if (filtered[sidx].name != QStringLiteral("PC Games"))
+                continue;
+            QVector<KadiaTileInfo> kept;
+            const QVector<KadiaTileInfo> original = filtered[sidx].tiles;
+            for (int i = 0; i < original.size(); ++i) {
+                const QString label = original[i].label;
+                if (!storeLabels.contains(label, Qt::CaseInsensitive) ||
+                    detectedStoresStorage().contains(label, Qt::CaseInsensitive))
+                    kept.push_back(original[i]);
+            }
+            filtered[sidx].tiles = kept;
+            break;
+        }
+
+        for (int sidx = filtered.size() - 1; sidx >= 0; --sidx) {
+            if (filtered[sidx].name != QStringLiteral("Unknowns"))
+                continue;
+            if (unknownRomsStorage().isEmpty()) {
+                filtered.remove(sidx);
+            } else {
+                QVector<KadiaTileInfo> romTiles;
+                for (int r = 0; r < unknownRomsStorage().size(); ++r) {
+                    const QString path = unknownRomsStorage()[r];
+                    QFileInfo fi(path);
+                    romTiles.push_back(KadiaTileInfo{fi.fileName(), QString(), fi.completeBaseName(),
+                        QStringLiteral("Unclassified ROM image: %1").arg(QDir::toNativeSeparators(path))});
+                }
+                filtered[sidx].tiles = romTiles;
+            }
+            break;
+        }
+    }
+    return filtered;
 }
 
 const QVector<KadiaGameInfo> &kadiaGames()

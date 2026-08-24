@@ -1,4 +1,8 @@
 #include "kadia_window.h"
+#include "background_settings.h"
+#include "rom_scanner.h"
+#include "windspro_bootstrap.h"
+#include "ui_model.h"
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -17,6 +21,8 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     , m_rendererAttempted(false)
     , m_closing(false)
     , m_monitorMode(false)
+    , m_romScanner(0)
+    , m_romDialogActive(false)
 {
     setWindowTitle(QStringLiteral("Mathery Kadia!"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -29,6 +35,7 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     setCursor(Qt::ArrowCursor);
     resize(m_scene.logicalSize());
     m_scene.setViewportSize(size());
+    BackgroundSettings::applyToScene(&m_scene, BackgroundSettings::load());
 
     m_input.initialize();
 
@@ -42,6 +49,10 @@ KadiaWindow::KadiaWindow(QWidget *parent)
 KadiaWindow::~KadiaWindow()
 {
     m_timer.stop();
+    if (m_romScanner) {
+        m_romScanner->requestStop();
+        m_romScanner->wait();
+    }
     m_renderer.shutdown();
 }
 
@@ -223,6 +234,7 @@ void KadiaWindow::frameTick()
     const InputManager::Action action = m_input.poll();
     if (action != InputManager::None)
         dispatch(action);
+    processSceneCommands();
     m_scene.setControllerConnected(m_input.controllerConnected());
 
     m_scene.setViewportSize(size());
@@ -230,6 +242,56 @@ void KadiaWindow::frameTick()
     m_scene.render(m_frame);
     if (!m_renderer.present(m_frame) && !m_renderer.lastError().isEmpty())
         qWarning() << m_renderer.lastError();
+}
+
+void KadiaWindow::runPostStartupChecks()
+{
+    if (m_closing)
+        return;
+
+    WinDSProBootstrap::offerOnce(this);
+
+    if (!m_romScanner) {
+        m_romScanner = new RomScanner(this);
+        connect(m_romScanner, SIGNAL(romDiscovered(QString,QString)),
+                this, SLOT(onRomDiscovered(QString,QString)));
+        m_romScanner->start();
+    }
+}
+
+void KadiaWindow::onRomDiscovered(const QString &path, const QString &hint)
+{
+    m_romQueue.enqueue(qMakePair(path, hint));
+    if (!m_romDialogActive)
+        QTimer::singleShot(0, this, SLOT(showNextRomDialog()));
+}
+
+void KadiaWindow::showNextRomDialog()
+{
+    if (m_romDialogActive || m_romQueue.isEmpty() || m_closing)
+        return;
+
+    m_romDialogActive = true;
+    const QPair<QString, QString> candidate = m_romQueue.dequeue();
+    RomClassificationDialog dialog(candidate.first, candidate.second, this);
+    if (dialog.exec() == QDialog::Accepted && !dialog.selectedSystem().isEmpty()) {
+        RomCatalog::saveClassification(candidate.first, dialog.selectedSystem());
+        setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
+    }
+    m_romDialogActive = false;
+
+    if (!m_romQueue.isEmpty())
+        QTimer::singleShot(0, this, SLOT(showNextRomDialog()));
+}
+
+void KadiaWindow::processSceneCommands()
+{
+    const KadiaScene::Command command = m_scene.takePendingCommand();
+    if (command == KadiaScene::OpenBackgroundSettings) {
+        BackgroundSettingsDialog dialog(this);
+        if (dialog.exec() == QDialog::Accepted)
+            BackgroundSettings::applyToScene(&m_scene, dialog.preferences());
+    }
 }
 
 void KadiaWindow::ensureRenderer()

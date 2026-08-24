@@ -111,3 +111,48 @@ The source intentionally avoids DWM, Direct2D, DirectWrite, WASAPI, WebEngine, Q
 - Tile icons are now drawn with a semantic vector icon system instead of generic glyph fallbacks.
 - Each option gets a unique icon signature derived from its section + label, so repeated labels across different sections no longer reuse the same exact icon.
 - Icons remain native `QPainter` geometry for Qt 5.6 / XP compatibility.
+
+
+## Required K-Lite Codec Pack Full bootstrap
+
+Kadia now treats **K-Lite Codec Pack Full** as a required runtime component. On startup it checks the standard K-Lite uninstall registry key. If a Full edition is already installed, startup continues immediately. Otherwise Kadia opens its own borderless setup-progress window, downloads the official installer from Codec Guide, verifies the pinned SHA-256 digest, and launches the installer with `/verysilent /norestart`.
+
+The package is selected for the running Windows version so XP compatibility is preserved:
+
+- Windows XP: K-Lite Codec Pack **13.8.5 Full** (last Full release documented by Codec Guide as XP SP3 compatible).
+- Windows Vista: K-Lite Codec Pack **16.7.6 Full** (last Vista-compatible release).
+- Windows 7 and newer: K-Lite Codec Pack **19.9.0 Full** (stable release pinned by this source tree).
+
+Download progress is real byte progress. During the silent Inno Setup phase, the custom progress bar is activity-based because `/verysilent` does not expose an external percentage API; it completes to 100% only after the installer process exits successfully and the Full edition is detected in the registry. On Vista and newer, Windows may still show the unavoidable UAC authorization prompt; the K-Lite installer UI itself remains silent.
+
+## Dynamic background, WinDS PRO, storefronts and ROM discovery
+
+This build adds four startup/runtime systems while preserving the original Aero ribbons and Win98-style starfield as independent overlay layers.
+
+### Backgrounds
+
+`Interface Settings -> Background` opens Kadia's controller-aware background panel. The user can choose:
+
+- the original Kadia background;
+- the current Windows desktop wallpaper with an adjustable translucent blend;
+- a custom image from Kadia's own controller-aware image browser.
+
+The custom image/wallpaper is drawn **under** the Vista/Aero ribbons, bloom, starfield, vignette and UI, so the animated effects never disappear when the image changes. Preferences are persisted through `QSettings`.
+
+### WinDS PRO one-time offer
+
+At first startup only, Kadia checks uninstall metadata plus common WinDS PRO installation folders. If WinDS PRO is missing it offers the user the WinDS PRO 2026.08.22 package once. Choosing Install uses the same Kadia-styled progress UX as the codec bootstrap, resolves the current MediaFire direct link, downloads it with byte progress, validates that the result is a large PE executable, then starts the Inno Setup package with `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`.
+
+The offer is intentionally optional and one-shot. The setting `windspro/offerShown` can be cleared manually if testing requires the prompt again.
+
+### Storefront detection
+
+Before the UI model is built, Kadia probes uninstall metadata and well-known installation paths for Steam, Epic Games Launcher, GOG Galaxy, EA/Origin, Amazon Games, Ubisoft Connect and Battle.net. Only storefronts actually detected on the current PC are retained in the `PC Games` row.
+
+### Whole-drive ROM scan
+
+After the main window appears, a background worker enumerates all mounted drive roots recursively and looks for ROM/disc-image extensions. Strongly identifying extensions preselect a likely console; ambiguous formats such as ISO, BIN, CUE, ROM, CHD, IMG, MDF and PBP are proposed as `Unknown`.
+
+Every newly discovered candidate is queued into a Kadia-owned controller-aware classification dialog. The user can confirm a console, choose `Unknown`, choose `None (ignore)` to permanently discard that path, or defer it until a future launch. Classifications are stored in `%APPDATA%/Mathery/Kadia/rom-catalog.ini` (or the Qt 5.6 equivalent AppData location). Existing `Unknown` entries are exposed as the dynamic `Unknowns` section.
+
+No WinForms or native file-picker dialogs are used by these features. Keyboard, mouse and XInput are supported by the custom Qt dialogs. Windows UAC itself can still appear when an installer needs elevation; that secure-desktop prompt is controlled by Windows and cannot safely be replaced or suppressed by Kadia.

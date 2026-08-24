@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QVector>
+#include <QStringList>
 
 struct KadiaTileInfo {
     QString label;
@@ -22,5 +23,8 @@ struct KadiaGameInfo {
     QString description;
 };
 
+void setKadiaDetectedStores(const QStringList &stores);
+QStringList kadiaDetectedStores();
+void setKadiaUnknownRoms(const QStringList &paths);
 const QVector<KadiaSectionInfo> &kadiaSections();
 const QVector<KadiaGameInfo> &kadiaGames();
