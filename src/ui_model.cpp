@@ -1,6 +1,5 @@
 #include "ui_model.h"
 #include "rom_scanner.h"
-#include "rom_header_detector.h"
 #include <QDir>
 #include <QFileInfo>
 #include <algorithm>
@@ -92,48 +91,39 @@ void setKadiaUnknownRoms(const QStringList &paths)
     unknownRomsStorage() = clean;
 }
 
-static bool buildKadiaGameFromPath(const QString &path, KadiaGameInfo *out)
+static bool buildKadiaGameFromRecord(const RomCatalogRecord &record, KadiaGameInfo *out)
 {
     if (!out)
         return false;
-    const RomHeaderInfo header = RomHeaderDetector::detect(path);
-    if (!header.isRom)
+
+    const QString system = record.classification.simplified();
+    if (system.isEmpty() ||
+        system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+        system.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
         return false;
 
-    QString system = header.system.simplified();
-    if (system.isEmpty() || system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
-        header.confidence < 90) {
-        const QString manualSystem = RomCatalog::classification(path).simplified();
-        if (manualSystem.isEmpty() || manualSystem.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
-            manualSystem.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
-            return false;
-        system = manualSystem;
-    }
-
-    QString title = RomCatalog::displayTitle(path).simplified();
+    QString title = record.scrapedTitle.simplified();
     if (title.isEmpty())
-        title = header.title.simplified();
+        title = record.internalTitle.simplified();
     if (title.isEmpty())
-        title = header.internalId.simplified();
+        title = record.internalId.simplified();
     if (title.isEmpty())
         title = system + QStringLiteral(" ROM");
 
     QString subtitle = system;
-    if (!RomCatalog::format(path).isEmpty())
-        subtitle += QStringLiteral("  -  ") + RomCatalog::format(path);
-    else if (!header.format.isEmpty())
-        subtitle += QStringLiteral("  -  ") + header.format;
+    if (!record.format.isEmpty())
+        subtitle += QStringLiteral("  -  ") + record.format;
 
-    QString description = RomCatalog::description(path).simplified();
+    QString description = record.scrapedDescription.simplified();
     if (description.isEmpty())
-        description = QDir::toNativeSeparators(path);
+        description = QDir::toNativeSeparators(record.path);
 
     out->title = title;
     out->subtitle = subtitle;
     out->description = description;
     out->system = system;
-    out->path = path;
-    out->coverPath = RomCatalog::coverArtPath(path);
+    out->path = record.path;
+    out->coverPath = record.coverArtPath;
     return true;
 }
 
@@ -148,22 +138,15 @@ void updateKadiaGameFromPath(const QString &path)
         }
     }
 
+    RomCatalogRecord record;
     KadiaGameInfo game;
-    if (!buildKadiaGameFromPath(path, &game)) {
+    if (!RomCatalog::recordForPath(path, &record) || !buildKadiaGameFromRecord(record, &game)) {
         if (existing >= 0)
             games.remove(existing);
-        RomCatalog::removeEntry(path);
         ++gameLibraryRevisionStorage();
         return;
     }
 
-    const RomHeaderInfo header = RomHeaderDetector::detect(path);
-    if (!header.system.isEmpty() &&
-        header.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) != 0 &&
-        header.confidence >= 90) {
-        RomCatalog::saveDetectedRom(path, header.system, header.title, header.internalId,
-                                    header.format, header.confidence);
-    }
     if (existing >= 0)
         games[existing] = game;
     else
@@ -180,10 +163,26 @@ void updateKadiaGameFromPath(const QString &path)
 
 void refreshKadiaGameLibrary()
 {
-    detectedGamesStorage().clear();
-    const QStringList paths = RomCatalog::recognizedPaths();
-    for (int i = 0; i < paths.size(); ++i)
-        updateKadiaGameFromPath(paths.at(i));
+    const QVector<RomCatalogRecord> records = RomCatalog::recognizedRecords();
+    QVector<KadiaGameInfo> rebuilt;
+    rebuilt.reserve(records.size());
+
+    for (int i = 0; i < records.size(); ++i) {
+        KadiaGameInfo game;
+        if (buildKadiaGameFromRecord(records.at(i), &game))
+            rebuilt.push_back(game);
+    }
+
+    // recognizedRecords() is already sorted by system/title, but keep this
+    // deterministic if the catalog ordering changes later.
+    std::sort(rebuilt.begin(), rebuilt.end(), [](const KadiaGameInfo &a, const KadiaGameInfo &b) {
+        const int bySystem = a.system.compare(b.system, Qt::CaseInsensitive);
+        if (bySystem != 0)
+            return bySystem < 0;
+        return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+    });
+
+    detectedGamesStorage().swap(rebuilt);
     ++gameLibraryRevisionStorage();
 }
 

@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 #include <QThread>
+#include <QVector>
 
 #include "input_manager.h"
 
@@ -16,6 +17,23 @@ class QListWidget;
 class QProgressBar;
 class QPushButton;
 class QTimer;
+
+
+struct RomCatalogRecord
+{
+    QString path;
+    QString classification;
+    QString internalTitle;
+    QString internalId;
+    QString format;
+    QString scrapedTitle;
+    QString scrapedDescription;
+    QString coverArtPath;
+    QString metadataSource;
+    bool automaticDetection;
+
+    RomCatalogRecord() : automaticDetection(false) {}
+};
 
 namespace RomCatalog
 {
@@ -42,6 +60,8 @@ namespace RomCatalog
     QStringList systems();
     QStringList pathsForClassification(const QString &classification);
     QStringList recognizedPaths();
+    bool recordForPath(const QString &path, RomCatalogRecord *record);
+    QVector<RomCatalogRecord> recognizedRecords();
 }
 
 class RomScanner : public QThread

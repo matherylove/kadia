@@ -26,6 +26,7 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <functional>
 
 #ifdef Q_OS_WIN
@@ -702,26 +703,80 @@ QStringList pathsForClassification(const QString &wanted)
 
 QStringList recognizedPaths()
 {
+    const QVector<RomCatalogRecord> records = recognizedRecords();
     QStringList paths;
+    paths.reserve(records.size());
+    for (int i = 0; i < records.size(); ++i)
+        paths << records.at(i).path;
+    return paths;
+}
+
+static void readCatalogRecordFromCurrentGroup(QSettings &s, RomCatalogRecord *record)
+{
+    if (!record)
+        return;
+    record->path = QDir::fromNativeSeparators(s.value(QStringLiteral("path")).toString());
+    record->classification = s.value(QStringLiteral("classification")).toString().simplified();
+    record->internalTitle = s.value(QStringLiteral("internalTitle")).toString().simplified();
+    record->internalId = s.value(QStringLiteral("internalId")).toString().simplified();
+    record->format = s.value(QStringLiteral("format")).toString().simplified();
+    record->scrapedTitle = s.value(QStringLiteral("scrapedTitle")).toString().simplified();
+    record->scrapedDescription = s.value(QStringLiteral("scrapedDescription")).toString().simplified();
+    record->coverArtPath = QDir::fromNativeSeparators(s.value(QStringLiteral("coverArtPath")).toString());
+    record->metadataSource = s.value(QStringLiteral("metadataSource")).toString().simplified();
+    record->automaticDetection =
+        s.value(QStringLiteral("classificationSource")).toString().compare(
+            QStringLiteral("automatic"), Qt::CaseInsensitive) == 0;
+}
+
+bool recordForPath(const QString &path, RomCatalogRecord *record)
+{
+    if (!record || path.trimmed().isEmpty())
+        return false;
+
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    readCatalogRecordFromCurrentGroup(s, record);
+    s.endGroup();
+    return !record->path.isEmpty() && !record->classification.isEmpty();
+}
+
+QVector<RomCatalogRecord> recognizedRecords()
+{
+    QVector<RomCatalogRecord> records;
     QSettings s(catalogPath(), QSettings::IniFormat);
     s.beginGroup(QStringLiteral("files"));
     const QStringList groups = s.childGroups();
+    records.reserve(groups.size());
+
     for (int i = 0; i < groups.size(); ++i) {
-        s.beginGroup(groups[i]);
-        const QString classificationValue = s.value(QStringLiteral("classification")).toString();
-        const QString path = QDir::fromNativeSeparators(s.value(QStringLiteral("path")).toString());
+        s.beginGroup(groups.at(i));
+        RomCatalogRecord record;
+        readCatalogRecordFromCurrentGroup(s, &record);
         s.endGroup();
-        if (classificationValue.isEmpty() ||
-            classificationValue.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
-            classificationValue.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
+
+        if (record.path.isEmpty() || record.classification.isEmpty() ||
+            record.classification.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+            record.classification.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
             continue;
-        if (!path.isEmpty() && QFileInfo(path).exists())
-            paths << path;
+
+        // Deliberately do not reopen or stat ROM files here. The scanner already
+        // validated them in its worker thread. A GUI-side QFileInfo::exists() on
+        // thousands of files (especially on slow/removable drives) can stall the
+        // Windows message pump just as badly as header detection did.
+        records.push_back(record);
     }
     s.endGroup();
-    paths.removeDuplicates();
-    paths.sort(Qt::CaseInsensitive);
-    return paths;
+
+    std::sort(records.begin(), records.end(), [](const RomCatalogRecord &a, const RomCatalogRecord &b) {
+        const int bySystem = a.classification.compare(b.classification, Qt::CaseInsensitive);
+        if (bySystem != 0)
+            return bySystem < 0;
+        const QString at = a.scrapedTitle.isEmpty() ? a.internalTitle : a.scrapedTitle;
+        const QString bt = b.scrapedTitle.isEmpty() ? b.internalTitle : b.scrapedTitle;
+        return at.compare(bt, Qt::CaseInsensitive) < 0;
+    });
+    return records;
 }
 
 }
