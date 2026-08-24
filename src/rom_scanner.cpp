@@ -28,6 +28,11 @@
 #include <QVBoxLayout>
 #include <functional>
 
+#ifdef Q_OS_WIN
+#  include <windows.h>
+#  include <process.h>
+#endif
+
 namespace {
 
 static QString catalogPath()
@@ -202,10 +207,13 @@ static bool saveScanCache(const QHash<QString, ScanCacheEntry> &cache,
         // Binary serialization is much faster than rewriting thousands of INI
         // groups. Still yield periodically so the render/message thread keeps
         // getting CPU even on old single/dual-core XP-era systems.
-        if ((written & 511) == 0 || written == total) {
+        if ((written & 63) == 0 || written == total) {
             if (progress)
                 progress(qBound(0, (written * 100) / total, 100));
-            QThread::yieldCurrentThread();
+            // Cache persistence is never time-critical.  Throttle it so even
+            // on a single-core machine or a slow mechanical disk Kadia's GUI
+            // and D3D9 animation keep getting CPU/I/O time.
+            QThread::msleep(2);
         }
     }
 
@@ -222,6 +230,52 @@ static bool saveScanCache(const QHash<QString, ScanCacheEntry> &cache,
     if (progress)
         progress(100);
     return true;
+}
+
+
+struct AsyncScanCacheSaveTask
+{
+    QHash<QString, ScanCacheEntry> cache;
+};
+
+#ifdef Q_OS_WIN
+static unsigned __stdcall asyncScanCacheSaveThread(void *opaque)
+{
+    AsyncScanCacheSaveTask *task = static_cast<AsyncScanCacheSaveTask *>(opaque);
+    if (!task)
+        return 0;
+
+    // XP supports THREAD_PRIORITY_LOWEST.  We intentionally do not use
+    // THREAD_MODE_BACKGROUND_BEGIN because that was introduced after XP.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    saveScanCache(task->cache, std::function<void(int)>());
+    delete task;
+    return 0;
+}
+#endif
+
+static bool saveScanCacheInBackground(const QHash<QString, ScanCacheEntry> &cache)
+{
+#ifdef Q_OS_WIN
+    AsyncScanCacheSaveTask *task = new AsyncScanCacheSaveTask;
+    task->cache = cache; // QHash is implicitly shared: this hand-off is cheap.
+
+    const uintptr_t handle = _beginthreadex(0, 0, asyncScanCacheSaveThread,
+                                             task, 0, 0);
+    if (handle == 0) {
+        delete task;
+        return false;
+    }
+
+    // Detached persistence: the scanner and GUI do not wait for the report.
+    // QSaveFile keeps the previous cache intact if Windows terminates Kadia
+    // before this background write completes.
+    CloseHandle(reinterpret_cast<HANDLE>(handle));
+    return true;
+#else
+    Q_UNUSED(cache);
+    return false;
+#endif
 }
 
 static ScanCacheEntry makeCacheEntry(const QFileInfo &fi, const QString &state,
@@ -930,14 +984,17 @@ void RomScanner::run()
     const bool cancelled = m_stop.loadAcquire() != 0;
     if (!cancelled) {
         const QString lastPath = total > 0 ? candidates.last() : QStringLiteral("ROM scan cache");
-        emit fileProgress(lastPath, 0, 100,
-                          QStringLiteral("Saving incremental scan cache"), total, total);
-        saveScanCache(scanCache, [this, lastPath, total](int percent) {
-            if (m_stop.loadAcquire())
-                return;
-            emit fileProgress(lastPath, percent, 100,
-                              QStringLiteral("Saving incremental scan cache"), total, total);
-        });
+        emit fileProgress(lastPath, 100, 100,
+                          QStringLiteral("Scan complete - saving cache in background"), total, total);
+
+        // Do not make the scanner/progress dialog wait for cache persistence.
+        // The report is copied by implicit sharing and written by a detached,
+        // lowest-priority thread.  This removes the end-of-scan UI stall.
+        if (!saveScanCacheInBackground(scanCache)) {
+            // Extremely unlikely fallback (thread creation failure). Keep the
+            // application responsive by simply leaving the previous cache in
+            // place; the next launch may rescan the delta instead of freezing.
+        }
     }
 
     Q_UNUSED(cachedSkipped);
