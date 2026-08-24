@@ -126,6 +126,11 @@ void KadiaWindow::resizeEvent(QResizeEvent *event)
 
 void KadiaWindow::keyPressEvent(QKeyEvent *event)
 {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+        event->accept();
+        return;
+    }
+
     if (event->isAutoRepeat() &&
         (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down ||
          event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)) {
@@ -169,6 +174,10 @@ void KadiaWindow::keyPressEvent(QKeyEvent *event)
 
 void KadiaWindow::mouseMoveEvent(QMouseEvent *event)
 {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+        event->accept();
+        return;
+    }
     if (m_scene.hoverAt(event->localPos()))
         event->accept();
     else
@@ -177,6 +186,10 @@ void KadiaWindow::mouseMoveEvent(QMouseEvent *event)
 
 void KadiaWindow::mousePressEvent(QMouseEvent *event)
 {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::RightButton) {
         m_scene.handle(KadiaScene::Back);
         event->accept();
@@ -192,6 +205,10 @@ void KadiaWindow::mousePressEvent(QMouseEvent *event)
 
 void KadiaWindow::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && m_scene.doubleClickAt(event->localPos())) {
         event->accept();
         return;
@@ -201,6 +218,10 @@ void KadiaWindow::mouseDoubleClickEvent(QMouseEvent *event)
 
 void KadiaWindow::wheelEvent(QWheelEvent *event)
 {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+        event->accept();
+        return;
+    }
     const int delta = event->angleDelta().y();
     if (delta != 0) {
         m_scene.wheelAt(QPointF(event->pos()), delta);
@@ -244,7 +265,8 @@ void KadiaWindow::frameTick()
     const bool scannerDialogVisible = m_romScanDialog && m_romScanDialog->isVisible();
     if (!scannerDialogVisible && !m_romDialogActive && action != InputManager::None)
         dispatch(action);
-    processSceneCommands();
+    if (!scannerDialogVisible && !m_romDialogActive)
+        processSceneCommands();
     m_scene.setControllerConnected(m_input.controllerConnected());
 
     m_scene.setViewportSize(size());
@@ -277,8 +299,6 @@ void KadiaWindow::runPostStartupChecks()
 
         connect(m_romScanner, SIGNAL(romDiscovered(QString,QString,QString,QString)),
                 this, SLOT(onRomDiscovered(QString,QString,QString,QString)));
-        connect(m_romScanner, SIGNAL(romRecognized(QString,QString,QString)),
-                this, SLOT(onRomRecognized(QString,QString,QString)));
         connect(m_romScanner, SIGNAL(scanSummary(int,int,int,bool)),
                 this, SLOT(onRomScanSummary(int,int,int,bool)));
         connect(m_romScanDialog, SIGNAL(cancelRequested()),
@@ -289,7 +309,7 @@ void KadiaWindow::runPostStartupChecks()
         m_romScanDialog->show();
         m_romScanDialog->raise();
         m_romScanDialog->activateWindow();
-        m_romScanner->start(QThread::LowPriority);
+        m_romScanner->start(QThread::LowestPriority);
     }
 }
 
@@ -310,13 +330,11 @@ void KadiaWindow::onRomDiscovered(const QString &path, const QString &hint,
 
 void KadiaWindow::onRomRecognized(const QString &path, const QString &system, const QString &title)
 {
+    Q_UNUSED(path);
     Q_UNUSED(system);
     Q_UNUSED(title);
-    // All binary/header work has already happened on RomScanner's worker
-    // thread. This only consumes catalog metadata and updates the GUI model.
-    if (!path.isEmpty())
-        updateKadiaGameFromPath(path);
-    setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
+    // Intentionally batched. Rebuilding/sorting the complete GUI library once
+    // per recognized ROM can flood the main event loop during a large scan.
 }
 
 void KadiaWindow::onRomScanSummary(int recognizedCount, int unresolvedCount,
@@ -337,6 +355,12 @@ void KadiaWindow::onRomScanDialogFinished(int result)
         m_romScanDialog->deleteLater();
         m_romScanDialog = 0;
     }
+
+    // One GUI-side catalog refresh after the worker is done. The scanner never
+    // rebuilds/sorts the library from its worker and no per-ROM UI work is
+    // queued while the scan is running.
+    refreshKadiaGameLibrary();
+    setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
 
     activateWindow();
     setFocus();

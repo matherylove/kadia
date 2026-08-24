@@ -6,10 +6,12 @@
 #include <QCryptographicHash>
 #include <QCloseEvent>
 #include <QDesktopWidget>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QDir>
 #include <QFileInfo>
 #include <QFrame>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QKeyEvent>
@@ -17,6 +19,7 @@
 #include <QPushButton>
 #include <QProgressBar>
 #include <QSettings>
+#include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -29,6 +32,14 @@ static QString catalogPath()
     if (base.isEmpty()) base = QDir::homePath() + QStringLiteral("/.mathery-kadia");
     QDir().mkpath(base);
     return QDir(base).filePath(QStringLiteral("rom-catalog.ini"));
+}
+
+static QString scanCachePath()
+{
+    QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (base.isEmpty()) base = QDir::homePath() + QStringLiteral("/.mathery-kadia");
+    QDir().mkpath(base);
+    return QDir(base).filePath(QStringLiteral("rom-scan-cache.ini"));
 }
 
 static QString keyForPath(const QString &path)
@@ -45,6 +56,118 @@ static QString normalizedScanPath(const QString &path)
     p = p.toLower();
 #endif
     return p;
+}
+
+struct ScanCacheEntry
+{
+    ScanCacheEntry()
+        : size(-1)
+        , modifiedMs(-1)
+        , confidence(0)
+    {
+    }
+
+    QString path;
+    qint64 size;
+    qint64 modifiedMs;
+    QString state;
+    QString system;
+    QString title;
+    QString internalId;
+    QString format;
+    int confidence;
+};
+
+static const int kScanCacheVersion = 2;
+
+static qint64 fileModifiedMs(const QFileInfo &fi)
+{
+    const QDateTime modified = fi.lastModified();
+    return modified.isValid() ? modified.toMSecsSinceEpoch() : -1;
+}
+
+static bool cacheMatchesFile(const ScanCacheEntry &entry, const QFileInfo &fi)
+{
+    const qint64 modified = fileModifiedMs(fi);
+    return entry.size >= 0 && entry.modifiedMs >= 0 && modified >= 0 &&
+           entry.size == fi.size() && entry.modifiedMs == modified;
+}
+
+static QHash<QString, ScanCacheEntry> loadScanCache()
+{
+    QHash<QString, ScanCacheEntry> cache;
+    QSettings s(scanCachePath(), QSettings::IniFormat);
+    if (s.value(QStringLiteral("meta/version"), 0).toInt() != kScanCacheVersion)
+        return cache;
+
+    s.beginGroup(QStringLiteral("files"));
+    const QStringList groups = s.childGroups();
+    for (int i = 0; i < groups.size(); ++i) {
+        s.beginGroup(groups.at(i));
+        ScanCacheEntry entry;
+        entry.path = QDir::fromNativeSeparators(s.value(QStringLiteral("path")).toString());
+        entry.size = s.value(QStringLiteral("size"), -1).toLongLong();
+        entry.modifiedMs = s.value(QStringLiteral("modifiedMs"), -1).toLongLong();
+        entry.state = s.value(QStringLiteral("state")).toString();
+        entry.system = s.value(QStringLiteral("system")).toString();
+        entry.title = s.value(QStringLiteral("title")).toString();
+        entry.internalId = s.value(QStringLiteral("internalId")).toString();
+        entry.format = s.value(QStringLiteral("format")).toString();
+        entry.confidence = s.value(QStringLiteral("confidence"), 0).toInt();
+        s.endGroup();
+
+        const QString key = normalizedScanPath(entry.path);
+        if (!key.isEmpty() && !entry.state.isEmpty())
+            cache.insert(key, entry);
+    }
+    s.endGroup();
+    return cache;
+}
+
+static void saveScanCache(const QHash<QString, ScanCacheEntry> &cache)
+{
+    QSettings s(scanCachePath(), QSettings::IniFormat);
+    s.clear();
+    s.setValue(QStringLiteral("meta/version"), kScanCacheVersion);
+    s.beginGroup(QStringLiteral("files"));
+
+    QHash<QString, ScanCacheEntry>::const_iterator it = cache.constBegin();
+    for (; it != cache.constEnd(); ++it) {
+        const ScanCacheEntry &entry = it.value();
+        if (entry.path.isEmpty() || entry.state.isEmpty())
+            continue;
+        s.beginGroup(keyForPath(entry.path));
+        s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(entry.path));
+        s.setValue(QStringLiteral("size"), entry.size);
+        s.setValue(QStringLiteral("modifiedMs"), entry.modifiedMs);
+        s.setValue(QStringLiteral("state"), entry.state);
+        s.setValue(QStringLiteral("system"), entry.system);
+        s.setValue(QStringLiteral("title"), entry.title);
+        s.setValue(QStringLiteral("internalId"), entry.internalId);
+        s.setValue(QStringLiteral("format"), entry.format);
+        s.setValue(QStringLiteral("confidence"), entry.confidence);
+        s.endGroup();
+    }
+    s.endGroup();
+    s.sync();
+}
+
+static ScanCacheEntry makeCacheEntry(const QFileInfo &fi, const QString &state,
+                                     const RomHeaderInfo *header = 0)
+{
+    ScanCacheEntry entry;
+    entry.path = fi.absoluteFilePath();
+    entry.size = fi.size();
+    entry.modifiedMs = fileModifiedMs(fi);
+    entry.state = state;
+    if (header) {
+        entry.system = header->system;
+        entry.title = header->title;
+        entry.internalId = header->internalId;
+        entry.format = header->format;
+        entry.confidence = header->confidence;
+    }
+    return entry;
 }
 
 static void addExcludedRoot(QStringList *roots, const QString &path)
@@ -427,13 +550,20 @@ void RomScanner::run()
     m_stop.storeRelease(0);
     const QFileInfoList drives = QDir::drives();
     const QStringList excludedRoots = excludedScanRoots();
+
+    // This cache is loaded once in the worker. File contents are only reopened
+    // when size or last-write time differs from the last completed scan.
+    QHash<QString, ScanCacheEntry> scanCache = loadScanCache();
     QStringList candidates;
+    QStringList cachedUnresolved;
     QElapsedTimer discoveryUiTimer;
     discoveryUiTimer.start();
+    int cachedSkipped = 0;
+    int directoryThrottle = 0;
 
-    // Phase 1: directory walk + extension prefilter only. This phase never
-    // opens file contents. Keeping it in this worker thread means even very
-    // large disks cannot stall Kadia's rendering/input loop.
+    // Phase 1: directory walk + extension prefilter + cheap metadata comparison.
+    // No candidate file content is opened here. Known unchanged files (both ROM
+    // and non-ROM) are excluded from structural analysis.
     for (int d = 0; d < drives.size() && !m_stop.loadAcquire(); ++d) {
         const QString root = drives[d].absoluteFilePath();
         QStringList pending;
@@ -444,7 +574,7 @@ void RomScanner::run()
             if (isExcludedScanDirectory(directory, root, excludedRoots))
                 continue;
 
-            if (discoveryUiTimer.elapsed() >= 50) {
+            if (discoveryUiTimer.elapsed() >= 100) {
                 emit discoveryProgress(QDir::toNativeSeparators(directory), candidates.size());
                 discoveryUiTimer.restart();
             }
@@ -455,7 +585,7 @@ void RomScanner::run()
                 QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
 
             for (int i = 0; i < entries.size() && !m_stop.loadAcquire(); ++i) {
-                const QFileInfo &fi = entries[i];
+                const QFileInfo &fi = entries.at(i);
                 if (fi.isDir()) {
                     if (!fi.isSymLink() &&
                         !isExcludedScanDirectory(fi.absoluteFilePath(), root, excludedRoots))
@@ -469,22 +599,45 @@ void RomScanner::run()
                 if (!RomHeaderDetector::isCandidatePath(path))
                     continue;
 
+                const QString cacheKey = normalizedScanPath(path);
+                const QHash<QString, ScanCacheEntry>::const_iterator cached = scanCache.constFind(cacheKey);
+                if (cached != scanCache.constEnd() && cacheMatchesFile(cached.value(), fi)) {
+                    // An unresolved file may have been manually classified after
+                    // the previous scan. Respect that decision without reopening it.
+                    if (cached.value().state == QStringLiteral("unresolved")) {
+                        bool needsPrompt = true;
+                        if (RomCatalog::isKnown(path)) {
+                            const QString manual = RomCatalog::classification(path);
+                            if (!manual.isEmpty())
+                                needsPrompt = false;
+                        }
+                        if (needsPrompt)
+                            cachedUnresolved << path;
+                    }
+                    ++cachedSkipped;
+                    continue;
+                }
+
                 candidates << path;
-                if (discoveryUiTimer.elapsed() >= 50) {
+                if (discoveryUiTimer.elapsed() >= 100) {
                     emit discoveryProgress(QDir::toNativeSeparators(path), candidates.size());
                     discoveryUiTimer.restart();
                 }
 
-                if ((i & 63) == 63)
-                    QThread::yieldCurrentThread();
+                if ((i & 127) == 127)
+                    QThread::msleep(1);
             }
+
+            if ((++directoryThrottle & 7) == 0)
+                QThread::msleep(1);
         }
     }
 
     candidates.removeDuplicates();
+    cachedUnresolved.removeDuplicates();
     const int total = candidates.size();
     emit discoveryProgress(total > 0 ? QDir::toNativeSeparators(candidates.last())
-                                     : QStringLiteral("No ROM candidates found"), total);
+                                     : QStringLiteral("ROM scan index is up to date"), total);
     emit analysisStarted(total);
 
     int recognizedCount = 0;
@@ -493,6 +646,7 @@ void RomScanner::run()
 
     for (int index = 0; index < total && !m_stop.loadAcquire(); ++index) {
         const QString path = candidates.at(index);
+        const QFileInfo fi(path);
         const int baseOverall = total > 0 ? (index * 100) / total : 100;
         emit fileProgress(path, 0, baseOverall, QStringLiteral("Preparing candidate"), index + 1, total);
 
@@ -503,10 +657,7 @@ void RomScanner::run()
             if (m_stop.loadAcquire())
                 return;
             const int boundedFile = qBound(0, filePercent, 100);
-            // Avoid flooding the GUI event queue when thousands of tiny files
-            // are rejected in milliseconds. Slow/large images still show live
-            // per-file stages, while fast files simply advance 0 -> 100.
-            if (boundedFile < 100 && boundedFile != 0 && fileUiTimer.elapsed() < 33)
+            if (boundedFile < 100 && boundedFile != 0 && fileUiTimer.elapsed() < 50)
                 return;
             if (boundedFile == lastReportedPercent && boundedFile != 100)
                 return;
@@ -518,18 +669,21 @@ void RomScanner::run()
             emit fileProgress(path, boundedFile, overall, stage, index + 1, total);
         };
 
-        ++testedCandidates;
-
-        // User decisions marked Unknown/None are intentionally not analyzed
-        // again. They still advance progress, but no content is opened.
+        // User decisions Unknown/None are authoritative and do not require a
+        // content read, even when this is the first scan-cache generation.
         if (RomCatalog::isKnown(path)) {
             const QString knownSystem = RomCatalog::classification(path);
             if (knownSystem.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
                 knownSystem.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0) {
+                ScanCacheEntry entry = makeCacheEntry(fi, QStringLiteral("classified"));
+                entry.system = knownSystem;
+                scanCache.insert(normalizedScanPath(path), entry);
                 report(100, QStringLiteral("Already classified by user"));
                 continue;
             }
         }
+
+        ++testedCandidates;
 
         // Every byte/header read below happens on this worker thread.
         const RomHeaderInfo header = RomHeaderDetector::detect(path, report);
@@ -538,34 +692,42 @@ void RomScanner::run()
             const QString knownSystem = RomCatalog::classification(path);
             if (!header.isRom) {
                 RomCatalog::removeEntry(path);
-                emit romRecognized(path, QString(), QString());
+                scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("nonrom"), &header));
             } else if (RomCatalog::isAutomaticDetection(path)) {
                 if (header.system.isEmpty() ||
                     header.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
                     header.confidence < 90) {
                     RomCatalog::removeEntry(path);
-                    emit romRecognized(path, QString(), QString());
+                    scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("unresolved"), &header));
+                    ++unresolvedCount;
+                    const QString hint = header.system.isEmpty() ? QStringLiteral("Unknown") : header.system;
+                    emit romDiscovered(path, hint, header.title, header.format);
                 } else {
                     RomCatalog::saveDetectedRom(path, header.system, header.title,
                                                 header.internalId, header.format,
                                                 header.confidence);
+                    scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("rom"), &header));
                     ++recognizedCount;
                 }
             } else {
-                // Manual classification stays authoritative; metadata is merely
-                // refreshed from the worker's latest structural inspection.
+                // Manual recognized classification stays authoritative. Only the
+                // metadata refresh occurs in this worker when the file changed.
                 RomCatalog::saveInspectionMetadata(path, header.system, header.title,
                                                    header.internalId, header.format,
                                                    header.confidence);
+                scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("rom"), &header));
                 if (!knownSystem.isEmpty())
                     ++recognizedCount;
             }
             report(100, QStringLiteral("Finished"));
+            QThread::msleep(1);
             continue;
         }
 
         if (!header.isRom) {
+            scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("nonrom"), &header));
             report(100, QStringLiteral("No ROM structure detected"));
+            QThread::msleep(1);
             continue;
         }
 
@@ -577,21 +739,47 @@ void RomScanner::run()
             RomCatalog::saveDetectedRom(path, header.system, header.title,
                                         header.internalId, header.format,
                                         header.confidence);
+            scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("rom"), &header));
             ++recognizedCount;
-            emit romRecognized(path, header.system, header.title);
+            // Do not send a per-ROM model-update signal to the GUI. Thousands of
+            // queued library rebuilds were starving Kadia's render/message loop.
         } else {
             RomCatalog::saveInspectionMetadata(path, header.system, header.title,
                                                header.internalId, header.format,
                                                header.confidence);
+            scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("unresolved"), &header));
             ++unresolvedCount;
             const QString hint = header.system.isEmpty() ? QStringLiteral("Unknown") : header.system;
             emit romDiscovered(path, hint, header.title, header.format);
         }
         report(100, QStringLiteral("Finished"));
-        QThread::yieldCurrentThread();
+        QThread::msleep(1);
+    }
+
+    // Unchanged unresolved files are not reopened, but they can still be shown
+    // to the user after the scan if no manual classification exists yet.
+    if (!m_stop.loadAcquire()) {
+        for (int i = 0; i < cachedUnresolved.size(); ++i) {
+            const QString path = cachedUnresolved.at(i);
+            const QHash<QString, ScanCacheEntry>::const_iterator it = scanCache.constFind(normalizedScanPath(path));
+            if (it == scanCache.constEnd())
+                continue;
+            const ScanCacheEntry &entry = it.value();
+            const QString hint = entry.system.isEmpty() ? QStringLiteral("Unknown") : entry.system;
+            ++unresolvedCount;
+            emit romDiscovered(path, hint, entry.title, entry.format);
+        }
     }
 
     const bool cancelled = m_stop.loadAcquire() != 0;
+    if (!cancelled) {
+        const QString lastPath = total > 0 ? candidates.last() : QStringLiteral("ROM scan cache");
+        emit fileProgress(lastPath, 100, 100,
+                          QStringLiteral("Saving scan results"), total, total);
+        saveScanCache(scanCache);
+    }
+
+    Q_UNUSED(cachedSkipped);
     emit scanSummary(recognizedCount, unresolvedCount, testedCandidates, cancelled);
     emit scanFinished();
 }
@@ -613,7 +801,11 @@ RomScanProgressDialog::RomScanProgressDialog(QWidget *parent)
     , m_cancelPending(false)
 {
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    setModal(true);
+    // Keep Kadia's main native/D3D window enabled while the scan runs. Making
+    // this window modal disabled the owner HWND on Windows and could make the
+    // shell look hung even though the worker dialog continued updating.
+    setModal(false);
+    setWindowModality(Qt::NonModal);
     setFixedSize(680, 360);
     setAttribute(Qt::WA_TranslucentBackground, true);
     setStyleSheet(scanProgressStyleSheet());
@@ -626,7 +818,7 @@ RomScanProgressDialog::RomScanProgressDialog(QWidget *parent)
 
     m_title->setText(QStringLiteral("Searching for ROMs"));
     QFont tf = m_title->font(); tf.setPixelSize(28); tf.setWeight(QFont::Light); m_title->setFont(tf);
-    m_status->setText(QStringLiteral("Indexing files with supported ROM extensions..."));
+    m_status->setText(QStringLiteral("Looking for new or changed ROM candidates..."));
     QFont sf = m_status->font(); sf.setPixelSize(15); m_status->setFont(sf);
     m_path->setText(QStringLiteral("Preparing scanner..."));
     m_path->setWordWrap(true);
@@ -712,7 +904,7 @@ void RomScanProgressDialog::onDiscoveryProgress(const QString &currentPath, int 
 {
     if (m_completed)
         return;
-    m_status->setText(QStringLiteral("Indexing ROM candidates - %1 found so far").arg(candidatesFound));
+    m_status->setText(QStringLiteral("Indexing ROM candidates - %1 new/changed found").arg(candidatesFound));
     m_path->setText(currentPath);
 }
 
@@ -727,10 +919,10 @@ void RomScanProgressDialog::onAnalysisStarted(int totalCandidates)
     m_fileProgress->setValue(0);
     m_overallProgress->setValue(totalCandidates == 0 ? 100 : 0);
     if (totalCandidates == 0) {
-        m_status->setText(QStringLiteral("No candidate ROM files were found."));
-        m_path->setText(QStringLiteral("No supported ROM extensions were found in scanned locations."));
+        m_status->setText(QStringLiteral("No new or changed ROM files require analysis."));
+        m_path->setText(QStringLiteral("Previously scanned unchanged files are being skipped from the cache."));
     } else {
-        m_status->setText(QStringLiteral("Analyzing %1 candidate files in the background...").arg(totalCandidates));
+        m_status->setText(QStringLiteral("Analyzing %1 new or changed candidates in the background...").arg(totalCandidates));
     }
 }
 
@@ -766,15 +958,19 @@ void RomScanProgressDialog::onScanSummary(int recognizedCount, int unresolvedCou
         m_title->setText(QStringLiteral("ROM search cancelled"));
         m_status->setText(QStringLiteral("Kadia stopped the background scan."));
         m_path->setText(QStringLiteral("%1 candidate files were tested before cancellation.").arg(testedCandidates));
+    } else if (testedCandidates == 0 && unresolvedCount == 0) {
+        m_title->setText(QStringLiteral("ROM library is up to date"));
+        m_status->setText(QStringLiteral("No new or changed ROM files needed structural analysis."));
+        m_path->setText(QStringLiteral("Kadia reused the results saved from the previous completed scan."));
     } else if (recognizedCount == 0 && unresolvedCount == 0) {
-        m_title->setText(QStringLiteral("No ROMs detected"));
-        m_status->setText(QStringLiteral("Kadia did not detect any valid ROMs."));
-        m_path->setText(QStringLiteral("%1 candidate files were structurally checked.").arg(testedCandidates));
+        m_title->setText(QStringLiteral("No new ROMs detected"));
+        m_status->setText(QStringLiteral("Kadia did not detect a valid ROM among the new or changed files."));
+        m_path->setText(QStringLiteral("%1 new/changed candidates were structurally checked.").arg(testedCandidates));
     } else {
         m_title->setText(QStringLiteral("ROM search complete"));
-        m_status->setText(QStringLiteral("%1 recognized automatically, %2 need identification.")
+        m_status->setText(QStringLiteral("%1 new/updated recognized automatically, %2 need identification.")
                           .arg(recognizedCount).arg(unresolvedCount));
-        m_path->setText(QStringLiteral("%1 candidate files were structurally checked.").arg(testedCandidates));
+        m_path->setText(QStringLiteral("%1 new/changed candidates were structurally checked.").arg(testedCandidates));
     }
 
     m_action->setEnabled(true);
