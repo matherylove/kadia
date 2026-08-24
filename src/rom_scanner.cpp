@@ -206,7 +206,7 @@ static bool isExcludedScanDirectory(const QString &directory,
     return false;
 }
 
-static QString styleSheet()
+static QString romDialogStyleSheet()
 {
     return QStringLiteral(
         "QDialog { background:transparent; }"
@@ -389,7 +389,7 @@ RomClassificationDialog::RomClassificationDialog(const QString &path, const QStr
     setModal(true);
     resize(760, 560);
     setAttribute(Qt::WA_TranslucentBackground, true);
-    setStyleSheet(styleSheet());
+    setStyleSheet(romDialogStyleSheet());
 
     QLabel *title = new QLabel(QStringLiteral("New ROM detected"), this);
     title->setObjectName(QStringLiteral("dialogTitle"));
