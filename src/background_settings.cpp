@@ -17,7 +17,13 @@
 #include <QVBoxLayout>
 
 #ifdef Q_OS_WIN
+// WIN32_LEAN_AND_MEAN is enabled globally for the XP build.  GDI+ headers
+// require COM stream/property declarations which windows.h omits in lean mode.
+// Include the COM definitions explicitly before gdiplus.h; otherwise VS2017
+// with the Windows 10 SDK reports IStream / PROPID / IImageBytes as unknown.
 #  include <windows.h>
+#  include <objidl.h>
+#  include <propidl.h>
 #  include <gdiplus.h>
 #endif
 

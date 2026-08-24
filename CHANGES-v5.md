@@ -13,3 +13,9 @@
 - Recursive asynchronous scan of all mounted drives for ROM/disc-image extensions.
 - Persistent per-file console classification with Unknown and None/ignore states.
 - Dynamic Unknowns section populated from classified ambiguous ROM images.
+
+## Build fix (VS2017 + Windows 10 SDK)
+
+- Fixed `background_settings.cpp` failing inside `gdiplus.h` when `WIN32_LEAN_AND_MEAN` is enabled.
+- Explicitly includes `objidl.h` and `propidl.h` before GDI+ so `IUnknown`, `IStream`, `PROPID`, and related COM declarations are available.
+- No runtime/UI behavior changed.
