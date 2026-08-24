@@ -15,6 +15,7 @@
 class QMouseEvent;
 class QWheelEvent;
 class RomScanner;
+class RomScanProgressDialog;
 
 class KadiaWindow : public QWidget
 {
@@ -42,8 +43,12 @@ protected:
 
 private slots:
     void frameTick();
-    void onRomDiscovered(const QString &path, const QString &hint);
+    void onRomDiscovered(const QString &path, const QString &hint,
+                         const QString &internalTitle, const QString &format);
     void onRomRecognized(const QString &path, const QString &system, const QString &title);
+    void onRomScanSummary(int recognizedCount, int unresolvedCount,
+                          int testedCandidates, bool cancelled);
+    void onRomScanDialogFinished(int result);
     void showNextRomDialog();
 
 private:
@@ -61,7 +66,16 @@ private:
     bool m_closing;
     bool m_monitorMode;
     QRect m_windowedGeometry;
+    struct PendingRom {
+        QString path;
+        QString hint;
+        QString internalTitle;
+        QString format;
+    };
+
     RomScanner *m_romScanner;
-    QQueue<QPair<QString, QString> > m_romQueue;
+    RomScanProgressDialog *m_romScanDialog;
+    QQueue<PendingRom> m_romQueue;
     bool m_romDialogActive;
+    bool m_romScanCancelled;
 };

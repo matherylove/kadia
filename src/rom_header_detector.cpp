@@ -715,35 +715,58 @@ bool isCandidatePath(const QString &path)
 
 RomHeaderInfo detect(const QString &path)
 {
+    return detect(path, ProgressCallback());
+}
+
+RomHeaderInfo detect(const QString &path, const ProgressCallback &progress)
+{
+    const auto report = [&](int percent, const QString &stage) {
+        if (progress)
+            progress(qBound(0, percent, 100), stage);
+    };
+
+    report(0, QStringLiteral("Checking candidate"));
+
     // Never open a file unless its extension is a plausible ROM/game-image
-    // extension.  The extension is only a performance/safety prefilter; it does
+    // extension. The extension is only a performance/safety prefilter; it does
     // NOT decide the console or whether the file is actually a ROM.
-    if (!isCandidatePath(path))
+    if (!isCandidatePath(path)) {
+        report(100, QStringLiteral("Skipped by extension filter"));
         return RomHeaderInfo();
+    }
 
     QFileInfo fi(path);
-    if (!fi.exists() || !fi.isFile() || fi.size() < 64)
+    if (!fi.exists() || !fi.isFile() || fi.size() < 64) {
+        report(100, QStringLiteral("Not a readable ROM candidate"));
         return RomHeaderInfo();
+    }
 
-    // Stage 2: once the cheap extension prefilter passes, identify the format
-    // solely from internal signatures/headers.
+    report(5, QStringLiteral("Opening file"));
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
+    if (!file.open(QIODevice::ReadOnly)) {
+        report(100, QStringLiteral("Could not open file"));
         return RomHeaderInfo();
+    }
 
-    if (isClearlyNonRomFile(file))
+    report(12, QStringLiteral("Rejecting non-ROM containers"));
+    if (isClearlyNonRomFile(file)) {
+        report(100, QStringLiteral("Known non-ROM structure"));
         return RomHeaderInfo();
+    }
 
     const qint64 size = file.size();
-    if (size > (static_cast<qint64>(32) * 1024 * 1024 * 1024))
+    if (size > (static_cast<qint64>(32) * 1024 * 1024 * 1024)) {
+        report(100, QStringLiteral("File exceeds ROM scan limit"));
         return RomHeaderInfo();
+    }
 
     RomHeaderInfo best;
     const qint64 mb = 1024 * 1024;
 
-    // Size gates are deliberately broad and are not extension-based.  They
+    // Size gates are deliberately broad and are not extension-based. They
     // avoid dozens of random seeks for obvious multi-gigabyte non-cartridge
     // files while still covering oversized dumps and padded images.
+    report(22, QStringLiteral("Checking cartridge headers"));
     if (size <= 64 * mb) {
         const RomHeaderInfo candidates[] = {
             detectNes(file), detectGameBoy(file), detectGba(file), detectN64(file),
@@ -753,41 +776,64 @@ RomHeaderInfo detect(const QString &path)
         for (unsigned int i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i)
             if (candidates[i].isRom && candidates[i].confidence > best.confidence)
                 best = candidates[i];
-        if (best.confidence >= 100)
+        if (best.confidence >= 100) {
+            report(100, QStringLiteral("ROM recognized"));
             return best;
+        }
     }
 
+    report(40, QStringLiteral("Checking Nintendo handheld headers"));
     if (size <= static_cast<qint64>(2) * 1024 * mb) {
         const RomHeaderInfo nds = detectNds(file);
         if (nds.isRom && nds.confidence > best.confidence) best = nds;
     }
 
+    report(52, QStringLiteral("Checking modern Nintendo containers"));
     const RomHeaderInfo modernNintendo = detect3dsSwitch(file);
     if (modernNintendo.isRom && modernNintendo.confidence > best.confidence) best = modernNintendo;
-    if (best.confidence >= 100) return best;
+    if (best.confidence >= 100) {
+        report(100, QStringLiteral("ROM recognized"));
+        return best;
+    }
 
+    report(62, QStringLiteral("Checking PlayStation portable containers"));
     const RomHeaderInfo pbp = detectPbp(file);
     if (pbp.isRom && pbp.confidence > best.confidence) best = pbp;
-    if (best.confidence >= 100) return best;
+    if (best.confidence >= 100) {
+        report(100, QStringLiteral("ROM recognized"));
+        return best;
+    }
 
+    report(70, QStringLiteral("Checking Sega disc headers"));
     const RomHeaderInfo segaDisc = detectSaturnDreamcast(file);
     if (segaDisc.isRom && segaDisc.confidence > best.confidence) best = segaDisc;
-    if (best.confidence >= 100) return best;
+    if (best.confidence >= 100) {
+        report(100, QStringLiteral("ROM recognized"));
+        return best;
+    }
 
     if (size >= 4 * mb) {
+        report(78, QStringLiteral("Checking Nintendo optical-disc headers"));
         const RomHeaderInfo nintendoDisc = detectGameCubeWii(file);
         if (nintendoDisc.isRom && nintendoDisc.confidence > best.confidence) best = nintendoDisc;
-        if (best.confidence >= 100) return best;
+        if (best.confidence >= 100) {
+            report(100, QStringLiteral("ROM recognized"));
+            return best;
+        }
 
+        report(88, QStringLiteral("Checking PlayStation optical-disc structure"));
         const RomHeaderInfo playStationDisc = detectPlayStationIso(file);
         if (playStationDisc.isRom && playStationDisc.confidence > best.confidence) best = playStationDisc;
     }
 
     if (size >= 100 * mb) {
+        report(96, QStringLiteral("Checking Xbox disc structure"));
         const RomHeaderInfo xbox = detectXboxDisc(file);
         if (xbox.isRom && xbox.confidence > best.confidence) best = xbox;
     }
 
+    report(100, best.isRom ? QStringLiteral("ROM recognized")
+                           : QStringLiteral("No ROM structure detected"));
     return best;
 }
 

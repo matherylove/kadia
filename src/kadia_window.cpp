@@ -22,7 +22,9 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     , m_closing(false)
     , m_monitorMode(false)
     , m_romScanner(0)
+    , m_romScanDialog(0)
     , m_romDialogActive(false)
+    , m_romScanCancelled(false)
 {
     setWindowTitle(QStringLiteral("Mathery Kadia!"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -55,6 +57,8 @@ KadiaWindow::~KadiaWindow()
         m_romScanner->requestStop();
         m_romScanner->wait();
     }
+    if (m_romScanDialog)
+        m_romScanDialog->close();
     m_renderer.shutdown();
 }
 
@@ -233,8 +237,12 @@ void KadiaWindow::frameTick()
     if (dt > 0.1)
         dt = 0.1;
 
+    // Keep polling to update edge state, but do not navigate the main menu
+    // behind a scanner/classification dialog. Dialogs use their own XInput
+    // manager while the renderer continues at the monitor refresh rate.
     const InputManager::Action action = m_input.poll();
-    if (action != InputManager::None)
+    const bool scannerDialogVisible = m_romScanDialog && m_romScanDialog->isVisible();
+    if (!scannerDialogVisible && !m_romDialogActive && action != InputManager::None)
         dispatch(action);
     processSceneCommands();
     m_scene.setControllerConnected(m_input.controllerConnected());
@@ -254,48 +262,105 @@ void KadiaWindow::runPostStartupChecks()
     WinDSProBootstrap::offerOnce(this);
 
     if (!m_romScanner) {
+        m_romScanCancelled = false;
         m_romScanner = new RomScanner(this);
-        connect(m_romScanner, SIGNAL(romDiscovered(QString,QString)),
-                this, SLOT(onRomDiscovered(QString,QString)));
+        m_romScanDialog = new RomScanProgressDialog(this);
+
+        connect(m_romScanner, SIGNAL(discoveryProgress(QString,int)),
+                m_romScanDialog, SLOT(onDiscoveryProgress(QString,int)));
+        connect(m_romScanner, SIGNAL(analysisStarted(int)),
+                m_romScanDialog, SLOT(onAnalysisStarted(int)));
+        connect(m_romScanner, SIGNAL(fileProgress(QString,int,int,QString,int,int)),
+                m_romScanDialog, SLOT(onFileProgress(QString,int,int,QString,int,int)));
+        connect(m_romScanner, SIGNAL(scanSummary(int,int,int,bool)),
+                m_romScanDialog, SLOT(onScanSummary(int,int,int,bool)));
+
+        connect(m_romScanner, SIGNAL(romDiscovered(QString,QString,QString,QString)),
+                this, SLOT(onRomDiscovered(QString,QString,QString,QString)));
         connect(m_romScanner, SIGNAL(romRecognized(QString,QString,QString)),
                 this, SLOT(onRomRecognized(QString,QString,QString)));
-        m_romScanner->start();
+        connect(m_romScanner, SIGNAL(scanSummary(int,int,int,bool)),
+                this, SLOT(onRomScanSummary(int,int,int,bool)));
+        connect(m_romScanDialog, SIGNAL(cancelRequested()),
+                m_romScanner, SLOT(requestStop()), Qt::DirectConnection);
+        connect(m_romScanDialog, SIGNAL(finished(int)),
+                this, SLOT(onRomScanDialogFinished(int)));
+
+        m_romScanDialog->show();
+        m_romScanDialog->raise();
+        m_romScanDialog->activateWindow();
+        m_romScanner->start(QThread::LowPriority);
     }
 }
 
-void KadiaWindow::onRomDiscovered(const QString &path, const QString &hint)
+void KadiaWindow::onRomDiscovered(const QString &path, const QString &hint,
+                                  const QString &internalTitle, const QString &format)
 {
-    m_romQueue.enqueue(qMakePair(path, hint));
-    if (!m_romDialogActive)
-        QTimer::singleShot(0, this, SLOT(showNextRomDialog()));
+    PendingRom candidate;
+    candidate.path = path;
+    candidate.hint = hint;
+    candidate.internalTitle = internalTitle;
+    candidate.format = format;
+    m_romQueue.enqueue(candidate);
+
+    // Do not interrupt the scan with classification prompts. The worker keeps
+    // running independently and unresolved dialogs begin only after the scan
+    // progress window is dismissed.
 }
 
 void KadiaWindow::onRomRecognized(const QString &path, const QString &system, const QString &title)
 {
     Q_UNUSED(system);
     Q_UNUSED(title);
-    // The scanner has already persisted the trusted structural detection.
-    // Refreshing the in-memory model makes the game appear immediately while
-    // scanning continues in the background.
+    // All binary/header work has already happened on RomScanner's worker
+    // thread. This only consumes catalog metadata and updates the GUI model.
     if (!path.isEmpty())
         updateKadiaGameFromPath(path);
     setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
 }
 
+void KadiaWindow::onRomScanSummary(int recognizedCount, int unresolvedCount,
+                                   int testedCandidates, bool cancelled)
+{
+    Q_UNUSED(recognizedCount);
+    Q_UNUSED(unresolvedCount);
+    Q_UNUSED(testedCandidates);
+    m_romScanCancelled = cancelled;
+    if (cancelled)
+        m_romQueue.clear();
+}
+
+void KadiaWindow::onRomScanDialogFinished(int result)
+{
+    Q_UNUSED(result);
+    if (m_romScanDialog) {
+        m_romScanDialog->deleteLater();
+        m_romScanDialog = 0;
+    }
+
+    activateWindow();
+    setFocus();
+
+    if (!m_romScanCancelled && !m_romQueue.isEmpty())
+        QTimer::singleShot(0, this, SLOT(showNextRomDialog()));
+}
+
 void KadiaWindow::showNextRomDialog()
 {
-    if (m_romDialogActive || m_romQueue.isEmpty() || m_closing)
+    if (m_romDialogActive || m_romQueue.isEmpty() || m_closing ||
+        (m_romScanDialog && m_romScanDialog->isVisible()))
         return;
 
     m_romDialogActive = true;
-    const QPair<QString, QString> candidate = m_romQueue.dequeue();
-    RomClassificationDialog dialog(candidate.first, candidate.second, this);
+    const PendingRom candidate = m_romQueue.dequeue();
+    RomClassificationDialog dialog(candidate.path, candidate.hint,
+                                   candidate.internalTitle, candidate.format, this);
     if (dialog.exec() == QDialog::Accepted && !dialog.selectedSystem().isEmpty()) {
-        RomCatalog::saveClassification(candidate.first, dialog.selectedSystem());
+        RomCatalog::saveClassification(candidate.path, dialog.selectedSystem());
         setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
         if (dialog.selectedSystem().compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) != 0 &&
             dialog.selectedSystem().compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) != 0)
-            refreshKadiaGameLibrary();
+            updateKadiaGameFromPath(candidate.path);
     }
     m_romDialogActive = false;
 

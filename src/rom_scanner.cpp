@@ -4,14 +4,18 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QCryptographicHash>
+#include <QCloseEvent>
 #include <QDesktopWidget>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QListWidget>
 #include <QPushButton>
+#include <QProgressBar>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
@@ -177,9 +181,9 @@ static QString romDialogStyleSheet()
         " border:1px solid rgba(255,248,231,54); border-radius:18px; }"
         "QFrame#accentGlow { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(255,240,200,8), stop:0.18 rgba(255,240,200,120), stop:0.52 rgba(166,194,255,78), stop:1 rgba(166,194,255,0)); border:none; border-radius:3px; }"
         "QLabel { color:#fff8e7; background:transparent; }"
-        "QLabel#dialogTitle { color:rgba(255,248,231,0.94); }"
-        "QLabel#dialogPath { color:rgba(255,248,231,0.68); }"
-        "QLabel#dialogHint { color:rgba(255,248,231,0.78); }"
+        "QLabel#dialogTitle { color:rgba(255,248,231,240); }"
+        "QLabel#dialogPath { color:rgba(255,248,231,174); }"
+        "QLabel#dialogHint { color:rgba(255,248,231,199); }"
         "QListWidget { background:rgba(8,12,22,176); color:#fff8e7; border:1px solid rgba(255,248,231,46); border-radius:12px; outline:none; padding:5px; }"
         "QListWidget::item { padding:7px 10px; margin:1px 0; border-radius:8px; }"
         "QListWidget::item:selected { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(73,83,109,216), stop:1 rgba(34,42,61,216)); color:#fff8e7; border:1px solid rgba(255,240,200,138); }"
@@ -187,6 +191,25 @@ static QString romDialogStyleSheet()
         "QPushButton:hover, QPushButton:focus { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(71,82,112,235), stop:1 rgba(26,34,54,230)); border:1px solid rgba(255,240,200,160); }"
         "QPushButton:pressed { background:rgba(22,28,44,235); }" );
 }
+
+static QString scanProgressStyleSheet()
+{
+    return QStringLiteral(
+        "QDialog { background:transparent; }"
+        "QFrame#glassPanel { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(24,33,50,242), stop:0.50 rgba(10,16,28,234), stop:1 rgba(6,10,18,242)); border:1px solid rgba(255,248,231,58); border-radius:18px; }"
+        "QFrame#accentGlow { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(255,240,200,8), stop:0.18 rgba(255,240,200,120), stop:0.52 rgba(166,194,255,78), stop:1 rgba(166,194,255,0)); border:none; border-radius:3px; }"
+        "QLabel { color:#fff8e7; background:transparent; }"
+        "QLabel#scanTitle { color:rgba(255,248,231,240); }"
+        "QLabel#scanStatus { color:rgba(255,248,231,209); }"
+        "QLabel#scanPath { color:rgba(255,248,231,148); }"
+        "QLabel#progressCaption { color:rgba(255,248,231,168); }"
+        "QProgressBar { border:1px solid rgba(255,248,231,52); border-radius:8px; padding:1px; background:rgba(8,13,22,190); color:#fff8e7; text-align:center; min-height:20px; }"
+        "QProgressBar::chunk { border-radius:6px; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(113,126,160,235), stop:0.48 rgba(184,176,158,238), stop:1 rgba(255,240,200,252)); }"
+        "QPushButton { color:#fff8e7; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(40,48,69,224), stop:1 rgba(18,24,37,224)); border:1px solid rgba(255,248,231,68); border-radius:12px; padding:8px 22px; min-width:112px; }"
+        "QPushButton:hover, QPushButton:focus { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(71,82,112,238), stop:1 rgba(26,34,54,234)); border:1px solid rgba(255,240,200,164); }"
+        "QPushButton:disabled { color:rgba(255,248,231,97); border-color:rgba(255,248,231,32); background:rgba(18,24,37,150); }" );
+}
+
 
 }
 
@@ -203,20 +226,34 @@ bool isKnown(const QString &path)
 
 void saveClassification(const QString &path, const QString &system)
 {
-    const RomHeaderInfo header = RomHeaderDetector::detect(path);
+    // Do not perform header detection here. This function is called from the
+    // GUI after the user answers the unresolved-ROM dialog; all binary analysis
+    // was already completed by RomScanner's worker thread.
     QSettings s(catalogPath(), QSettings::IniFormat);
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
     s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
     s.setValue(QStringLiteral("classification"), system);
     s.setValue(QStringLiteral("classificationSource"), QStringLiteral("manual"));
-    if (header.isRom) {
-        s.setValue(QStringLiteral("detectedSystem"), header.system);
-        s.setValue(QStringLiteral("internalTitle"), header.title);
-        s.setValue(QStringLiteral("internalId"), header.internalId);
-        s.setValue(QStringLiteral("format"), header.format);
-        s.setValue(QStringLiteral("confidence"), header.confidence);
-    }
-    s.endGroup(); s.sync();
+    s.endGroup();
+    s.sync();
+}
+
+void saveInspectionMetadata(const QString &path, const QString &detectedSystem,
+                            const QString &title, const QString &internalIdValue,
+                            const QString &formatValue, int confidence)
+{
+    // Store the worker's inspection result without marking the file as already
+    // classified. If the user chooses Later, Kadia may ask again next scan.
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
+    s.setValue(QStringLiteral("detectedSystem"), detectedSystem.simplified());
+    s.setValue(QStringLiteral("internalTitle"), title.simplified());
+    s.setValue(QStringLiteral("internalId"), internalIdValue.simplified());
+    s.setValue(QStringLiteral("format"), formatValue.simplified());
+    s.setValue(QStringLiteral("confidence"), confidence);
+    s.endGroup();
+    s.sync();
 }
 
 void saveDetectedRom(const QString &path, const QString &system, const QString &title,
@@ -251,10 +288,7 @@ QString internalTitle(const QString &path)
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
     QString title = s.value(QStringLiteral("internalTitle")).toString();
     s.endGroup();
-    if (!title.isEmpty())
-        return title;
-    const RomHeaderInfo header = RomHeaderDetector::detect(path);
-    return header.title;
+    return title;
 }
 
 QString internalId(const QString &path)
@@ -384,116 +418,397 @@ QStringList recognizedPaths()
 
 }
 
-RomScanner::RomScanner(QObject *parent) : QThread(parent), m_stop(false) {}
+RomScanner::RomScanner(QObject *parent) : QThread(parent), m_stop(0) {}
 RomScanner::~RomScanner(){ requestStop(); wait(); }
-void RomScanner::requestStop(){ m_stop = true; }
+void RomScanner::requestStop(){ m_stop.storeRelease(1); }
 
 void RomScanner::run()
 {
+    m_stop.storeRelease(0);
     const QFileInfoList drives = QDir::drives();
     const QStringList excludedRoots = excludedScanRoots();
+    QStringList candidates;
+    QElapsedTimer discoveryUiTimer;
+    discoveryUiTimer.start();
 
-    for (int d = 0; d < drives.size() && !m_stop; ++d) {
+    // Phase 1: directory walk + extension prefilter only. This phase never
+    // opens file contents. Keeping it in this worker thread means even very
+    // large disks cannot stall Kadia's rendering/input loop.
+    for (int d = 0; d < drives.size() && !m_stop.loadAcquire(); ++d) {
         const QString root = drives[d].absoluteFilePath();
-        emit scanStatus(QStringLiteral("Scanning %1 for ROM headers...").arg(QDir::toNativeSeparators(root)));
-
-        // Use an explicit directory stack instead of QDirIterator::Subdirectories.
-        // QDirIterator cannot prune a subtree after entering it, while the stack
-        // lets Kadia completely avoid Windows, Program Files, caches, recycle
-        // bins, recovery data, etc.
         QStringList pending;
         pending << root;
 
-        while (!pending.isEmpty() && !m_stop) {
+        while (!pending.isEmpty() && !m_stop.loadAcquire()) {
             const QString directory = pending.takeLast();
             if (isExcludedScanDirectory(directory, root, excludedRoots))
                 continue;
+
+            if (discoveryUiTimer.elapsed() >= 50) {
+                emit discoveryProgress(QDir::toNativeSeparators(directory), candidates.size());
+                discoveryUiTimer.restart();
+            }
 
             QDir dir(directory);
             const QFileInfoList entries = dir.entryInfoList(
                 QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Readable,
                 QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
 
-            for (int i = 0; i < entries.size() && !m_stop; ++i) {
+            for (int i = 0; i < entries.size() && !m_stop.loadAcquire(); ++i) {
                 const QFileInfo &fi = entries[i];
-
                 if (fi.isDir()) {
-                    // Do not follow symlinks/junction-like entries into another
-                    // part of the filesystem; this avoids duplicate scans and
-                    // recursive directory cycles.
                     if (!fi.isSymLink() &&
                         !isExcludedScanDirectory(fi.absoluteFilePath(), root, excludedRoots))
                         pending << fi.absoluteFilePath();
                     continue;
                 }
-
                 if (!fi.isFile())
                     continue;
 
                 const QString path = fi.absoluteFilePath();
-
-                // Stage 1: extension prefilter only. This is intentionally done
-                // before any QFile/content inspection, so Kadia does not open
-                // every file on the machine looking for ROM signatures.
                 if (!RomHeaderDetector::isCandidatePath(path))
                     continue;
 
-                // Existing ignored/unknown choices are never prompted again.
-                // Existing recognized entries are revalidated with the current
-                // structural detector so old false positives disappear after a
-                // detector update (for example RIFF/WAVE files once mistaken
-                // for a cartridge by weak heuristics).
-                if (RomCatalog::isKnown(path)) {
-                    const QString knownSystem = RomCatalog::classification(path);
-                    if (knownSystem.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
-                        knownSystem.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
-                        continue;
-
-                    const RomHeaderInfo knownHeader = RomHeaderDetector::detect(path);
-                    if (!knownHeader.isRom) {
-                        RomCatalog::removeEntry(path);
-                        emit romRecognized(path, QString(), QString());
-                    } else if (RomCatalog::isAutomaticDetection(path)) {
-                        if (knownHeader.system.isEmpty() ||
-                            knownHeader.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
-                            knownHeader.confidence < 90) {
-                            RomCatalog::removeEntry(path);
-                            emit romRecognized(path, QString(), QString());
-                        } else {
-                            RomCatalog::saveDetectedRom(path, knownHeader.system, knownHeader.title,
-                                                        knownHeader.internalId, knownHeader.format,
-                                                        knownHeader.confidence);
-                        }
-                    }
-                    continue;
+                candidates << path;
+                if (discoveryUiTimer.elapsed() >= 50) {
+                    emit discoveryProgress(QDir::toNativeSeparators(path), candidates.size());
+                    discoveryUiTimer.restart();
                 }
 
-                // Recognition is entirely structural.  The extension and the
-                // filename are never used to decide whether this is a ROM.
-                const RomHeaderInfo header = RomHeaderDetector::detect(path);
-                if (!header.isRom)
-                    continue;
-
-                const bool consoleKnown = !header.system.isEmpty() &&
-                    header.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) != 0 &&
-                    header.confidence >= 90;
-
-                if (consoleKnown) {
-                    RomCatalog::saveDetectedRom(path, header.system, header.title,
-                                                header.internalId, header.format,
-                                                header.confidence);
-                    emit romRecognized(path, header.system, header.title);
-                } else {
-                    // Only unresolved structural ROM detections reach the user.
-                    emit romDiscovered(path, QStringLiteral("Unknown"));
-                }
+                if ((i & 63) == 63)
+                    QThread::yieldCurrentThread();
             }
         }
     }
+
+    candidates.removeDuplicates();
+    const int total = candidates.size();
+    emit discoveryProgress(total > 0 ? QDir::toNativeSeparators(candidates.last())
+                                     : QStringLiteral("No ROM candidates found"), total);
+    emit analysisStarted(total);
+
+    int recognizedCount = 0;
+    int unresolvedCount = 0;
+    int testedCandidates = 0;
+
+    for (int index = 0; index < total && !m_stop.loadAcquire(); ++index) {
+        const QString path = candidates.at(index);
+        const int baseOverall = total > 0 ? (index * 100) / total : 100;
+        emit fileProgress(path, 0, baseOverall, QStringLiteral("Preparing candidate"), index + 1, total);
+
+        QElapsedTimer fileUiTimer;
+        fileUiTimer.start();
+        int lastReportedPercent = -1;
+        const auto report = [this, path, index, total, &fileUiTimer, &lastReportedPercent](int filePercent, const QString &stage) {
+            if (m_stop.loadAcquire())
+                return;
+            const int boundedFile = qBound(0, filePercent, 100);
+            // Avoid flooding the GUI event queue when thousands of tiny files
+            // are rejected in milliseconds. Slow/large images still show live
+            // per-file stages, while fast files simply advance 0 -> 100.
+            if (boundedFile < 100 && boundedFile != 0 && fileUiTimer.elapsed() < 33)
+                return;
+            if (boundedFile == lastReportedPercent && boundedFile != 100)
+                return;
+            lastReportedPercent = boundedFile;
+            fileUiTimer.restart();
+            const int overall = total > 0
+                ? qBound(0, ((index * 100) + boundedFile) / total, 100)
+                : 100;
+            emit fileProgress(path, boundedFile, overall, stage, index + 1, total);
+        };
+
+        ++testedCandidates;
+
+        // User decisions marked Unknown/None are intentionally not analyzed
+        // again. They still advance progress, but no content is opened.
+        if (RomCatalog::isKnown(path)) {
+            const QString knownSystem = RomCatalog::classification(path);
+            if (knownSystem.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+                knownSystem.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0) {
+                report(100, QStringLiteral("Already classified by user"));
+                continue;
+            }
+        }
+
+        // Every byte/header read below happens on this worker thread.
+        const RomHeaderInfo header = RomHeaderDetector::detect(path, report);
+
+        if (RomCatalog::isKnown(path)) {
+            const QString knownSystem = RomCatalog::classification(path);
+            if (!header.isRom) {
+                RomCatalog::removeEntry(path);
+                emit romRecognized(path, QString(), QString());
+            } else if (RomCatalog::isAutomaticDetection(path)) {
+                if (header.system.isEmpty() ||
+                    header.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+                    header.confidence < 90) {
+                    RomCatalog::removeEntry(path);
+                    emit romRecognized(path, QString(), QString());
+                } else {
+                    RomCatalog::saveDetectedRom(path, header.system, header.title,
+                                                header.internalId, header.format,
+                                                header.confidence);
+                    ++recognizedCount;
+                }
+            } else {
+                // Manual classification stays authoritative; metadata is merely
+                // refreshed from the worker's latest structural inspection.
+                RomCatalog::saveInspectionMetadata(path, header.system, header.title,
+                                                   header.internalId, header.format,
+                                                   header.confidence);
+                if (!knownSystem.isEmpty())
+                    ++recognizedCount;
+            }
+            report(100, QStringLiteral("Finished"));
+            continue;
+        }
+
+        if (!header.isRom) {
+            report(100, QStringLiteral("No ROM structure detected"));
+            continue;
+        }
+
+        const bool consoleKnown = !header.system.isEmpty() &&
+            header.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) != 0 &&
+            header.confidence >= 90;
+
+        if (consoleKnown) {
+            RomCatalog::saveDetectedRom(path, header.system, header.title,
+                                        header.internalId, header.format,
+                                        header.confidence);
+            ++recognizedCount;
+            emit romRecognized(path, header.system, header.title);
+        } else {
+            RomCatalog::saveInspectionMetadata(path, header.system, header.title,
+                                               header.internalId, header.format,
+                                               header.confidence);
+            ++unresolvedCount;
+            const QString hint = header.system.isEmpty() ? QStringLiteral("Unknown") : header.system;
+            emit romDiscovered(path, hint, header.title, header.format);
+        }
+        report(100, QStringLiteral("Finished"));
+        QThread::yieldCurrentThread();
+    }
+
+    const bool cancelled = m_stop.loadAcquire() != 0;
+    emit scanSummary(recognizedCount, unresolvedCount, testedCandidates, cancelled);
     emit scanFinished();
 }
 
-RomClassificationDialog::RomClassificationDialog(const QString &path, const QString &hint, QWidget *parent)
+RomScanProgressDialog::RomScanProgressDialog(QWidget *parent)
+    : QDialog(parent)
+    , m_title(new QLabel(this))
+    , m_status(new QLabel(this))
+    , m_path(new QLabel(this))
+    , m_fileCaption(new QLabel(this))
+    , m_overallCaption(new QLabel(this))
+    , m_fileProgress(new QProgressBar(this))
+    , m_overallProgress(new QProgressBar(this))
+    , m_action(new QPushButton(QStringLiteral("Cancel"), this))
+    , m_input(this)
+    , m_inputTimer(new QTimer(this))
+    , m_completed(false)
+    , m_cancelled(false)
+    , m_cancelPending(false)
+{
+    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    setModal(true);
+    setFixedSize(680, 360);
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    setStyleSheet(scanProgressStyleSheet());
+
+    m_title->setObjectName(QStringLiteral("scanTitle"));
+    m_status->setObjectName(QStringLiteral("scanStatus"));
+    m_path->setObjectName(QStringLiteral("scanPath"));
+    m_fileCaption->setObjectName(QStringLiteral("progressCaption"));
+    m_overallCaption->setObjectName(QStringLiteral("progressCaption"));
+
+    m_title->setText(QStringLiteral("Searching for ROMs"));
+    QFont tf = m_title->font(); tf.setPixelSize(28); tf.setWeight(QFont::Light); m_title->setFont(tf);
+    m_status->setText(QStringLiteral("Indexing files with supported ROM extensions..."));
+    QFont sf = m_status->font(); sf.setPixelSize(15); m_status->setFont(sf);
+    m_path->setText(QStringLiteral("Preparing scanner..."));
+    m_path->setWordWrap(true);
+
+    m_fileCaption->setText(QStringLiteral("Current file"));
+    m_overallCaption->setText(QStringLiteral("Overall scan"));
+
+    // During directory discovery the total number of candidate files is not
+    // known yet, so both bars are indeterminate. They become true percentages
+    // before any file content/header analysis starts.
+    m_fileProgress->setRange(0, 0);
+    m_overallProgress->setRange(0, 0);
+    m_fileProgress->setTextVisible(false);
+    m_overallProgress->setTextVisible(false);
+
+    QFrame *panel = new QFrame(this);
+    panel->setObjectName(QStringLiteral("glassPanel"));
+    QFrame *accent = new QFrame(panel);
+    accent->setObjectName(QStringLiteral("accentGlow"));
+    accent->setFixedHeight(6);
+
+    QHBoxLayout *buttons = new QHBoxLayout;
+    buttons->addStretch();
+    buttons->addWidget(m_action);
+
+    QVBoxLayout *panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(28, 18, 28, 24);
+    panelLayout->setSpacing(9);
+    panelLayout->addWidget(accent);
+    panelLayout->addSpacing(3);
+    panelLayout->addWidget(m_title);
+    panelLayout->addWidget(m_status);
+    panelLayout->addWidget(m_path);
+    panelLayout->addSpacing(5);
+    panelLayout->addWidget(m_fileCaption);
+    panelLayout->addWidget(m_fileProgress);
+    panelLayout->addSpacing(3);
+    panelLayout->addWidget(m_overallCaption);
+    panelLayout->addWidget(m_overallProgress);
+    panelLayout->addSpacing(4);
+    panelLayout->addLayout(buttons);
+
+    QVBoxLayout *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(panel);
+
+    connect(m_action, SIGNAL(clicked()), this, SLOT(actionPressed()));
+    m_input.initialize();
+    connect(m_inputTimer, SIGNAL(timeout()), this, SLOT(pollController()));
+    m_inputTimer->start(16);
+
+    QRect target = parent ? parent->frameGeometry()
+                          : QApplication::desktop()->screenGeometry(QApplication::desktop()->primaryScreen());
+    move(target.center() - rect().center());
+    m_action->setFocus();
+}
+
+bool RomScanProgressDialog::scanCompleted() const { return m_completed; }
+bool RomScanProgressDialog::scanCancelled() const { return m_cancelled; }
+
+void RomScanProgressDialog::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
+        event->key() == Qt::Key_Escape || event->key() == Qt::Key_Backspace) {
+        actionPressed();
+        event->accept();
+        return;
+    }
+    QDialog::keyPressEvent(event);
+}
+
+void RomScanProgressDialog::closeEvent(QCloseEvent *event)
+{
+    if (!m_completed) {
+        actionPressed();
+        event->ignore();
+        return;
+    }
+    QDialog::closeEvent(event);
+}
+
+void RomScanProgressDialog::onDiscoveryProgress(const QString &currentPath, int candidatesFound)
+{
+    if (m_completed)
+        return;
+    m_status->setText(QStringLiteral("Indexing ROM candidates - %1 found so far").arg(candidatesFound));
+    m_path->setText(currentPath);
+}
+
+void RomScanProgressDialog::onAnalysisStarted(int totalCandidates)
+{
+    if (m_completed)
+        return;
+    m_fileProgress->setRange(0, 100);
+    m_overallProgress->setRange(0, 100);
+    m_fileProgress->setTextVisible(true);
+    m_overallProgress->setTextVisible(true);
+    m_fileProgress->setValue(0);
+    m_overallProgress->setValue(totalCandidates == 0 ? 100 : 0);
+    if (totalCandidates == 0) {
+        m_status->setText(QStringLiteral("No candidate ROM files were found."));
+        m_path->setText(QStringLiteral("No supported ROM extensions were found in scanned locations."));
+    } else {
+        m_status->setText(QStringLiteral("Analyzing %1 candidate files in the background...").arg(totalCandidates));
+    }
+}
+
+void RomScanProgressDialog::onFileProgress(const QString &path, int filePercent, int overallPercent,
+                                           const QString &stage, int currentIndex, int totalCandidates)
+{
+    if (m_completed)
+        return;
+    m_fileProgress->setRange(0, 100);
+    m_overallProgress->setRange(0, 100);
+    m_fileProgress->setTextVisible(true);
+    m_overallProgress->setTextVisible(true);
+    m_fileProgress->setValue(qBound(0, filePercent, 100));
+    m_overallProgress->setValue(qBound(0, overallPercent, 100));
+    m_status->setText(QStringLiteral("%1  -  file %2 of %3").arg(stage).arg(currentIndex).arg(totalCandidates));
+    m_path->setText(QDir::toNativeSeparators(path));
+}
+
+void RomScanProgressDialog::onScanSummary(int recognizedCount, int unresolvedCount,
+                                          int testedCandidates, bool cancelled)
+{
+    m_completed = true;
+    m_cancelled = cancelled;
+    m_cancelPending = false;
+    m_fileProgress->setRange(0, 100);
+    m_overallProgress->setRange(0, 100);
+    m_fileProgress->setValue(100);
+    m_overallProgress->setValue(cancelled ? m_overallProgress->value() : 100);
+    m_fileProgress->setTextVisible(true);
+    m_overallProgress->setTextVisible(true);
+
+    if (cancelled) {
+        m_title->setText(QStringLiteral("ROM search cancelled"));
+        m_status->setText(QStringLiteral("Kadia stopped the background scan."));
+        m_path->setText(QStringLiteral("%1 candidate files were tested before cancellation.").arg(testedCandidates));
+    } else if (recognizedCount == 0 && unresolvedCount == 0) {
+        m_title->setText(QStringLiteral("No ROMs detected"));
+        m_status->setText(QStringLiteral("Kadia did not detect any valid ROMs."));
+        m_path->setText(QStringLiteral("%1 candidate files were structurally checked.").arg(testedCandidates));
+    } else {
+        m_title->setText(QStringLiteral("ROM search complete"));
+        m_status->setText(QStringLiteral("%1 recognized automatically, %2 need identification.")
+                          .arg(recognizedCount).arg(unresolvedCount));
+        m_path->setText(QStringLiteral("%1 candidate files were structurally checked.").arg(testedCandidates));
+    }
+
+    m_action->setEnabled(true);
+    m_action->setText(QStringLiteral("Continue"));
+    m_action->setFocus();
+}
+
+void RomScanProgressDialog::actionPressed()
+{
+    if (m_completed) {
+        accept();
+        return;
+    }
+    if (m_cancelPending)
+        return;
+    m_cancelPending = true;
+    m_action->setEnabled(false);
+    m_action->setText(QStringLiteral("Stopping..."));
+    m_status->setText(QStringLiteral("Stopping ROM search safely..."));
+    emit cancelRequested();
+}
+
+void RomScanProgressDialog::pollController()
+{
+    const InputManager::Action a = m_input.poll();
+    if (a == InputManager::None)
+        return;
+    if (a == InputManager::Accept || a == InputManager::Back)
+        actionPressed();
+}
+
+RomClassificationDialog::RomClassificationDialog(const QString &path, const QString &hint,
+                                                 const QString &internalTitle, const QString &format,
+                                                 QWidget *parent)
     : QDialog(parent), m_path(path), m_pathLabel(new QLabel(this)), m_hintLabel(new QLabel(this)),
       m_systems(new QListWidget(this)), m_confirm(new QPushButton(QStringLiteral("Confirm"), this)),
       m_later(new QPushButton(QStringLiteral("Later"), this)), m_input(this), m_inputTimer(new QTimer(this))
@@ -514,11 +829,10 @@ RomClassificationDialog::RomClassificationDialog(const QString &path, const QStr
     QFont pf = m_pathLabel->font(); pf.setPixelSize(12); m_pathLabel->setFont(pf);
 
     m_hintLabel->setObjectName(QStringLiteral("dialogHint"));
-    const RomHeaderInfo header = RomHeaderDetector::detect(path);
-    const QString detectedTitle = header.title.isEmpty()
+    const QString detectedTitle = internalTitle.isEmpty()
         ? QStringLiteral("No standardized internal title is present in this ROM format")
-        : header.title;
-    const QString detectedFormat = header.format.isEmpty() ? QStringLiteral("ROM image") : header.format;
+        : internalTitle;
+    const QString detectedFormat = format.isEmpty() ? QStringLiteral("ROM image") : format;
     m_hintLabel->setText(QStringLiteral("Internal title: %1\nDetected system: %2  |  Format: %3\nConfirm the console, choose Unknown if the detection is ambiguous, or None to discard this file permanently.")
                          .arg(detectedTitle, hint, detectedFormat));
     m_hintLabel->setWordWrap(true);

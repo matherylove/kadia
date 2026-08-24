@@ -1,6 +1,5 @@
 #include "ui_model.h"
 #include "rom_scanner.h"
-#include "rom_header_detector.h"
 #include <QDir>
 #include <QFileInfo>
 #include <algorithm>
@@ -94,31 +93,28 @@ void setKadiaUnknownRoms(const QStringList &paths)
 
 static bool buildKadiaGameFromPath(const QString &path, KadiaGameInfo *out)
 {
-    if (!out)
-        return false;
-    const RomHeaderInfo header = RomHeaderDetector::detect(path);
-    if (!header.isRom)
+    if (!out || !QFileInfo(path).exists())
         return false;
 
-    QString system = header.system.simplified();
+    // The GUI never opens ROM files or reruns header detection. Everything here
+    // comes from metadata persisted by RomScanner's worker thread.
+    const QString system = RomCatalog::classification(path).simplified();
     if (system.isEmpty() || system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
-        header.confidence < 90) {
-        const QString manualSystem = RomCatalog::classification(path).simplified();
-        if (manualSystem.isEmpty() || manualSystem.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
-            manualSystem.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
-            return false;
-        system = manualSystem;
-    }
+        system.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
+        return false;
 
-    QString title = header.title.simplified();
+    QString title = RomCatalog::internalTitle(path).simplified();
     if (title.isEmpty())
-        title = header.internalId.simplified();
+        title = RomCatalog::internalId(path).simplified();
     if (title.isEmpty())
-        title = system + QStringLiteral(" ROM");
+        title = QFileInfo(path).completeBaseName().simplified();
+    if (title.isEmpty())
+        return false;
 
+    const QString detectedFormat = RomCatalog::format(path).simplified();
     QString subtitle = system;
-    if (!header.format.isEmpty())
-        subtitle += QStringLiteral("  -  ") + header.format;
+    if (!detectedFormat.isEmpty())
+        subtitle += QStringLiteral("  -  ") + detectedFormat;
 
     out->title = title;
     out->subtitle = subtitle;
@@ -143,18 +139,10 @@ void updateKadiaGameFromPath(const QString &path)
     if (!buildKadiaGameFromPath(path, &game)) {
         if (existing >= 0)
             games.remove(existing);
-        RomCatalog::removeEntry(path);
         ++gameLibraryRevisionStorage();
         return;
     }
 
-    const RomHeaderInfo header = RomHeaderDetector::detect(path);
-    if (!header.system.isEmpty() &&
-        header.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) != 0 &&
-        header.confidence >= 90) {
-        RomCatalog::saveDetectedRom(path, header.system, header.title, header.internalId,
-                                    header.format, header.confidence);
-    }
     if (existing >= 0)
         games[existing] = game;
     else
@@ -173,8 +161,17 @@ void refreshKadiaGameLibrary()
 {
     detectedGamesStorage().clear();
     const QStringList paths = RomCatalog::recognizedPaths();
-    for (int i = 0; i < paths.size(); ++i)
-        updateKadiaGameFromPath(paths.at(i));
+    for (int i = 0; i < paths.size(); ++i) {
+        KadiaGameInfo game;
+        if (buildKadiaGameFromPath(paths.at(i), &game))
+            detectedGamesStorage().push_back(game);
+    }
+    std::sort(detectedGamesStorage().begin(), detectedGamesStorage().end(), [](const KadiaGameInfo &a, const KadiaGameInfo &b) {
+        const int bySystem = a.system.compare(b.system, Qt::CaseInsensitive);
+        if (bySystem != 0)
+            return bySystem < 0;
+        return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+    });
     ++gameLibraryRevisionStorage();
 }
 
