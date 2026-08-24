@@ -53,6 +53,7 @@ SOURCES += \
     src/background_settings.cpp \
     src/rom_scanner.cpp \
     src/rom_header_detector.cpp \
+    src/libretro_metadata.cpp \
     src/screenscraper_client.cpp \
     src/ui_model.cpp
 
@@ -68,6 +69,7 @@ HEADERS += \
     src/background_settings.h \
     src/rom_scanner.h \
     src/rom_header_detector.h \
+    src/libretro_metadata.h \
     src/screenscraper_client.h \
     src/ui_model.h
 

@@ -16,6 +16,8 @@ class QMouseEvent;
 class QWheelEvent;
 class RomScanner;
 class RomScanProgressDialog;
+class LibretroMetadataWorker;
+class LibretroMetadataProgressDialog;
 
 class KadiaWindow : public QWidget
 {
@@ -49,6 +51,7 @@ private slots:
     void onRomScanSummary(int recognizedCount, int unresolvedCount,
                           int testedCandidates, bool cancelled);
     void onRomScanDialogFinished(int result);
+    void onMetadataDialogFinished(int result);
     void showNextRomDialog();
 
 private:
@@ -75,6 +78,8 @@ private:
 
     RomScanner *m_romScanner;
     RomScanProgressDialog *m_romScanDialog;
+    LibretroMetadataWorker *m_metadataWorker;
+    LibretroMetadataProgressDialog *m_metadataDialog;
     QQueue<PendingRom> m_romQueue;
     bool m_romDialogActive;
     bool m_romScanCancelled;

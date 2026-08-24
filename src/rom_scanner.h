@@ -56,6 +56,11 @@ namespace RomCatalog
     void saveScreenScraperMetadata(const QString &path, const QString &title,
                                    const QString &description, const QString &coverPath,
                                    const QString &source);
+    void saveExternalMetadata(const QString &path, const QString &title,
+                              const QString &description, const QString &coverPath,
+                              const QString &source);
+    bool metadataLookupCurrent(const QString &path);
+    void markMetadataLookup(const QString &path, const QString &state);
     bool isAutomaticDetection(const QString &path);
     QStringList systems();
     QStringList pathsForClassification(const QString &classification);

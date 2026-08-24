@@ -1,6 +1,7 @@
 #include "kadia_window.h"
 #include "background_settings.h"
 #include "rom_scanner.h"
+#include "libretro_metadata.h"
 #include "windspro_bootstrap.h"
 #include "ui_model.h"
 
@@ -23,6 +24,8 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     , m_monitorMode(false)
     , m_romScanner(0)
     , m_romScanDialog(0)
+    , m_metadataWorker(0)
+    , m_metadataDialog(0)
     , m_romDialogActive(false)
     , m_romScanCancelled(false)
 {
@@ -59,6 +62,12 @@ KadiaWindow::~KadiaWindow()
     }
     if (m_romScanDialog)
         m_romScanDialog->close();
+    if (m_metadataWorker) {
+        m_metadataWorker->requestStop();
+        m_metadataWorker->wait();
+    }
+    if (m_metadataDialog)
+        m_metadataDialog->close();
     m_renderer.shutdown();
 }
 
@@ -126,7 +135,8 @@ void KadiaWindow::resizeEvent(QResizeEvent *event)
 
 void KadiaWindow::keyPressEvent(QKeyEvent *event)
 {
-    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) ||
+        (m_metadataDialog && m_metadataDialog->isVisible()) || m_romDialogActive) {
         event->accept();
         return;
     }
@@ -174,7 +184,8 @@ void KadiaWindow::keyPressEvent(QKeyEvent *event)
 
 void KadiaWindow::mouseMoveEvent(QMouseEvent *event)
 {
-    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) ||
+        (m_metadataDialog && m_metadataDialog->isVisible()) || m_romDialogActive) {
         event->accept();
         return;
     }
@@ -186,7 +197,8 @@ void KadiaWindow::mouseMoveEvent(QMouseEvent *event)
 
 void KadiaWindow::mousePressEvent(QMouseEvent *event)
 {
-    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) ||
+        (m_metadataDialog && m_metadataDialog->isVisible()) || m_romDialogActive) {
         event->accept();
         return;
     }
@@ -205,7 +217,8 @@ void KadiaWindow::mousePressEvent(QMouseEvent *event)
 
 void KadiaWindow::mouseDoubleClickEvent(QMouseEvent *event)
 {
-    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) ||
+        (m_metadataDialog && m_metadataDialog->isVisible()) || m_romDialogActive) {
         event->accept();
         return;
     }
@@ -218,7 +231,8 @@ void KadiaWindow::mouseDoubleClickEvent(QMouseEvent *event)
 
 void KadiaWindow::wheelEvent(QWheelEvent *event)
 {
-    if ((m_romScanDialog && m_romScanDialog->isVisible()) || m_romDialogActive) {
+    if ((m_romScanDialog && m_romScanDialog->isVisible()) ||
+        (m_metadataDialog && m_metadataDialog->isVisible()) || m_romDialogActive) {
         event->accept();
         return;
     }
@@ -263,9 +277,10 @@ void KadiaWindow::frameTick()
     // manager while the renderer continues at the monitor refresh rate.
     const InputManager::Action action = m_input.poll();
     const bool scannerDialogVisible = m_romScanDialog && m_romScanDialog->isVisible();
-    if (!scannerDialogVisible && !m_romDialogActive && action != InputManager::None)
+    const bool metadataDialogVisible = m_metadataDialog && m_metadataDialog->isVisible();
+    if (!scannerDialogVisible && !metadataDialogVisible && !m_romDialogActive && action != InputManager::None)
         dispatch(action);
-    if (!scannerDialogVisible && !m_romDialogActive)
+    if (!scannerDialogVisible && !metadataDialogVisible && !m_romDialogActive)
         processSceneCommands();
     m_scene.setControllerConnected(m_input.controllerConnected());
 
@@ -356,9 +371,56 @@ void KadiaWindow::onRomScanDialogFinished(int result)
         m_romScanDialog = 0;
     }
 
-    // One GUI-side catalog refresh after the worker is done. The scanner never
-    // rebuilds/sorts the library from its worker and no per-ROM UI work is
-    // queued while the scan is running.
+    activateWindow();
+    setFocus();
+
+    // Metadata is deliberately a second phase. ROM discovery/header analysis is
+    // complete before any database download, hashing for identification or cover
+    // download begins. All of that work runs in its own low-priority thread.
+    if (!m_romScanCancelled && !m_metadataWorker) {
+        m_metadataWorker = new LibretroMetadataWorker(this);
+        m_metadataDialog = new LibretroMetadataProgressDialog(this);
+
+        connect(m_metadataWorker, SIGNAL(metadataStarted(int)),
+                m_metadataDialog, SLOT(onMetadataStarted(int)));
+        connect(m_metadataWorker, SIGNAL(metadataProgress(QString,QString,QString,int,int,int,int)),
+                m_metadataDialog, SLOT(onMetadataProgress(QString,QString,QString,int,int,int,int)));
+        connect(m_metadataWorker, SIGNAL(metadataSummary(int,int,int,bool)),
+                m_metadataDialog, SLOT(onMetadataSummary(int,int,int,bool)));
+        connect(m_metadataDialog, SIGNAL(cancelRequested()),
+                m_metadataWorker, SLOT(requestStop()), Qt::DirectConnection);
+        connect(m_metadataDialog, SIGNAL(finished(int)),
+                this, SLOT(onMetadataDialogFinished(int)));
+
+        m_metadataDialog->show();
+        m_metadataDialog->raise();
+        m_metadataDialog->activateWindow();
+        m_metadataWorker->start(QThread::LowestPriority);
+        return;
+    }
+
+    refreshKadiaGameLibrary();
+    setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
+    if (!m_romScanCancelled && !m_romQueue.isEmpty())
+        QTimer::singleShot(0, this, SLOT(showNextRomDialog()));
+}
+
+void KadiaWindow::onMetadataDialogFinished(int result)
+{
+    Q_UNUSED(result);
+    if (m_metadataDialog) {
+        m_metadataDialog->deleteLater();
+        m_metadataDialog = 0;
+    }
+
+    if (m_metadataWorker && m_metadataWorker->isRunning()) {
+        // The summary is emitted immediately before the worker exits. Never wait
+        // here: keeping the QThread object parented to Kadia lets it finish its
+        // last instructions without blocking the Windows message/render loop.
+        m_metadataWorker->requestStop();
+    }
+
+    // This refresh is memory/catalog only; it never reopens ROM contents.
     refreshKadiaGameLibrary();
     setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
 
@@ -372,7 +434,8 @@ void KadiaWindow::onRomScanDialogFinished(int result)
 void KadiaWindow::showNextRomDialog()
 {
     if (m_romDialogActive || m_romQueue.isEmpty() || m_closing ||
-        (m_romScanDialog && m_romScanDialog->isVisible()))
+        (m_romScanDialog && m_romScanDialog->isVisible()) ||
+        (m_metadataDialog && m_metadataDialog->isVisible()))
         return;
 
     m_romDialogActive = true;

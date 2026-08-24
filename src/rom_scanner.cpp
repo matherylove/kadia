@@ -1,6 +1,5 @@
 #include "rom_scanner.h"
 #include "rom_header_detector.h"
-#include "screenscraper_client.h"
 
 #include <QApplication>
 #include <QByteArray>
@@ -599,9 +598,9 @@ bool hasScreenScraperMetadata(const QString &path)
     return hasTitle || hasDescription || hasCover;
 }
 
-void saveScreenScraperMetadata(const QString &path, const QString &title,
-                               const QString &descriptionValue, const QString &coverPath,
-                               const QString &source)
+void saveExternalMetadata(const QString &path, const QString &title,
+                          const QString &descriptionValue, const QString &coverPath,
+                          const QString &source)
 {
     QSettings s(catalogPath(), QSettings::IniFormat);
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
@@ -614,6 +613,51 @@ void saveScreenScraperMetadata(const QString &path, const QString &title,
     if (!source.trimmed().isEmpty())
         s.setValue(QStringLiteral("metadataSource"), source.trimmed());
     s.setValue(QStringLiteral("metadataUpdatedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    s.endGroup();
+    s.sync();
+}
+
+void saveScreenScraperMetadata(const QString &path, const QString &title,
+                               const QString &descriptionValue, const QString &coverPath,
+                               const QString &source)
+{
+    saveExternalMetadata(path, title, descriptionValue, coverPath, source);
+}
+
+bool metadataLookupCurrent(const QString &path)
+{
+    const QFileInfo fi(path);
+    if (!fi.exists() || !fi.isFile())
+        return true;
+
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    const QString state = s.value(QStringLiteral("metadataLookupState")).toString();
+    const int lookupVersion = s.value(QStringLiteral("metadataLookupVersion"), 0).toInt();
+    const qint64 savedSize = s.value(QStringLiteral("metadataFileSize"), qint64(-1)).toLongLong();
+    const qint64 savedMtime = s.value(QStringLiteral("metadataFileMtime"), qint64(-1)).toLongLong();
+    const QDateTime checkedAt = s.value(QStringLiteral("metadataLookupCheckedAt")).toDateTime();
+    s.endGroup();
+    if (state.isEmpty() || lookupVersion != 1)
+        return false;
+    if (savedSize != fi.size() || savedMtime != fi.lastModified().toMSecsSinceEpoch())
+        return false;
+    if (state.compare(QStringLiteral("notfound"), Qt::CaseInsensitive) == 0 &&
+        (!checkedAt.isValid() || checkedAt.daysTo(QDateTime::currentDateTimeUtc()) >= 30))
+        return false;
+    return true;
+}
+
+void markMetadataLookup(const QString &path, const QString &state)
+{
+    const QFileInfo fi(path);
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    s.setValue(QStringLiteral("metadataLookupState"), state);
+    s.setValue(QStringLiteral("metadataLookupVersion"), 1);
+    s.setValue(QStringLiteral("metadataFileSize"), fi.exists() ? fi.size() : qint64(-1));
+    s.setValue(QStringLiteral("metadataFileMtime"), fi.exists() ? fi.lastModified().toMSecsSinceEpoch() : qint64(-1));
+    s.setValue(QStringLiteral("metadataLookupCheckedAt"), QDateTime::currentDateTimeUtc());
     s.endGroup();
     s.sync();
 }
@@ -781,25 +825,6 @@ QVector<RomCatalogRecord> recognizedRecords()
 
 }
 
-static void maybeEnrichWithScreenScraper(const QString &path, const QString &system,
-                                         const QString &headerTitle, const QString &internalId)
-{
-    if (system.trimmed().isEmpty() ||
-        system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
-        system.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
-        return;
-    if (RomCatalog::hasScreenScraperMetadata(path) || !ScreenScraperClient::isConfigured())
-        return;
-
-    const ScreenScraperMetadata meta = ScreenScraperClient::fetchMetadata(path, system,
-                                                                          headerTitle,
-                                                                          internalId);
-    if (meta.success) {
-        RomCatalog::saveScreenScraperMetadata(path, meta.title, meta.description,
-                                              meta.coverPath, meta.source);
-    }
-}
-
 RomScanner::RomScanner(QObject *parent) : QThread(parent), m_stop(0) {}
 RomScanner::~RomScanner(){ requestStop(); wait(); }
 void RomScanner::requestStop(){ m_stop.storeRelease(1); }
@@ -965,8 +990,6 @@ void RomScanner::run()
                     RomCatalog::saveDetectedRom(path, header.system, header.title,
                                                 header.internalId, header.format,
                                                 header.confidence);
-                    maybeEnrichWithScreenScraper(path, header.system, header.title,
-                                                 header.internalId);
                     scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("rom"), &header));
                     ++recognizedCount;
                 }
@@ -976,8 +999,6 @@ void RomScanner::run()
                 RomCatalog::saveInspectionMetadata(path, header.system, header.title,
                                                    header.internalId, header.format,
                                                    header.confidence);
-                maybeEnrichWithScreenScraper(path, knownSystem, header.title,
-                                             header.internalId);
                 scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("rom"), &header));
                 if (!knownSystem.isEmpty())
                     ++recognizedCount;
@@ -1002,8 +1023,6 @@ void RomScanner::run()
             RomCatalog::saveDetectedRom(path, header.system, header.title,
                                         header.internalId, header.format,
                                         header.confidence);
-            maybeEnrichWithScreenScraper(path, header.system, header.title,
-                                         header.internalId);
             scanCache.insert(normalizedScanPath(path), makeCacheEntry(fi, QStringLiteral("rom"), &header));
             ++recognizedCount;
             // Do not send a per-ROM model-update signal to the GUI. Thousands of
