@@ -23,6 +23,7 @@ struct KadiaGameInfo {
     QString description;
     QString system;
     QString path;
+    QString coverPath;
 };
 
 void setKadiaDetectedStores(const QStringList &stores);

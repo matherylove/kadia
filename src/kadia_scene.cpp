@@ -2,7 +2,11 @@
 #include "ui_model.h"
 
 #include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
 #include <QFontDatabase>
+#include <QPixmap>
+#include <QHash>
 #include <QFile>
 #include <QtCore/qendian.h>
 #include <QLinearGradient>
@@ -67,6 +71,43 @@ static QColor withAlpha(const QColor &c, int alpha)
     QColor out(c);
     out.setAlpha(alpha);
     return out;
+}
+
+struct CoverCacheEntry
+{
+    bool tried;
+    QPixmap pixmap;
+    CoverCacheEntry() : tried(false) {}
+};
+
+static QHash<QString, CoverCacheEntry> &coverCache()
+{
+    static QHash<QString, CoverCacheEntry> cache;
+    return cache;
+}
+
+static const QPixmap *coverPixmapForPath(const QString &path)
+{
+    const QString key = QDir::cleanPath(path);
+    if (key.isEmpty())
+        return 0;
+    CoverCacheEntry &entry = coverCache()[key];
+    if (!entry.tried) {
+        entry.tried = true;
+        if (QFileInfo(key).exists())
+            entry.pixmap.load(key);
+    }
+    if (entry.pixmap.isNull())
+        return 0;
+    return &entry.pixmap;
+}
+
+static qreal coverAspectForGame(const KadiaGameInfo &game)
+{
+    const QPixmap *pm = coverPixmapForPath(game.coverPath);
+    if (pm && !pm->isNull() && pm->height() > 0)
+        return qBound<qreal>(0.55, qreal(pm->width()) / qreal(pm->height()), 1.65);
+    return 0.72;
 }
 }
 
@@ -337,7 +378,11 @@ bool KadiaScene::hoverAt(const QPointF &point)
             else if (i == m_previousGame)
                 sel = 1.0 - t;
             selections.push_back(sel);
-            widths.push_back(113.0 + (148.0 - 113.0) * sel);
+            const qreal targetH = 160.0 + (210.0 - 160.0) * sel;
+        const qreal labelH = 34.0 + 8.0 * sel;
+        const qreal artH = qMax<qreal>(72.0, targetH - labelH - 12.0);
+        const qreal width = qBound<qreal>(105.0, artH * coverAspectForGame(games.at(i)) + 14.0, 220.0);
+        widths.push_back(width);
         }
 
         qreal raw = 0.0;
@@ -985,7 +1030,11 @@ void KadiaScene::drawLibrary(QPainter &p)
             sel = t;
         else if (i == m_previousGame)
             sel = 1.0 - t;
-        widths.push_back(113.0 + (148.0 - 113.0) * sel);
+        const qreal targetH = 160.0 + (210.0 - 160.0) * sel;
+        const qreal labelH = 34.0 + 8.0 * sel;
+        const qreal artH = qMax<qreal>(72.0, targetH - labelH - 12.0);
+        const qreal width = qBound<qreal>(105.0, artH * coverAspectForGame(games.at(i)) + 14.0, 220.0);
+        widths.push_back(width);
     }
 
     qreal selectedCenter = 0.0;
@@ -1718,31 +1767,61 @@ void KadiaScene::drawGameCard(QPainter &p, const QRectF &rect, float selection, 
     };
 
     p.save();
-    QLinearGradient bg(rect.topLeft(), rect.bottomRight());
-    bg.setColorAt(0.0, a1[index % 6]);
-    bg.setColorAt(0.58, a2[index % 6]);
-    bg.setColorAt(1.0, a3[index % 6]);
-    p.setBrush(bg);
-    p.setPen(QPen(QColor(255, 248, 231, static_cast<int>(26 + 120 * selection)), 1.0));
-    p.drawRoundedRect(rect, 3.0, 3.0);
+    const qreal radius = 3.5;
+    QPainterPath clipPath;
+    clipPath.addRoundedRect(rect, radius, radius);
+    p.setClipPath(clipPath);
 
-    QLinearGradient topSpec(rect.left(), rect.top(), rect.left(), rect.top() + rect.height() * 0.28);
-    topSpec.setColorAt(0.0, QColor(255,255,255,28));
-    topSpec.setColorAt(1.0, QColor(255,255,255,0));
-    p.fillRect(QRectF(rect.left()+1.0, rect.top()+1.0, rect.width()-2.0, rect.height()*0.28), topSpec);
+    QLinearGradient shell(rect.topLeft(), rect.bottomRight());
+    shell.setColorAt(0.0, QColor(255,255,255,12));
+    shell.setColorAt(0.22, QColor(19,26,40,238));
+    shell.setColorAt(1.0, QColor(7,11,19,245));
+    p.fillPath(clipPath, shell);
 
     const qreal labelH = 34.0 + 8.0 * selection;
-    QLinearGradient labelGrad(rect.left(), rect.bottom() - labelH, rect.left(), rect.bottom());
-    labelGrad.setColorAt(0.0, QColor(5,8,14,40));
-    labelGrad.setColorAt(1.0, QColor(5,8,14,245));
-    p.fillRect(QRectF(rect.left()+1.0, rect.bottom()-labelH, rect.width()-2.0, labelH-1.0), labelGrad);
+    const QRectF artArea(rect.left() + 4.0, rect.top() + 4.0,
+                         rect.width() - 8.0, rect.height() - labelH - 8.0);
 
     const QVector<KadiaGameInfo> &games = kadiaGames();
-    if (index >= 0 && index < games.size()) {
+    const KadiaGameInfo *game = (index >= 0 && index < games.size()) ? &games[index] : 0;
+    const QPixmap *cover = game ? coverPixmapForPath(game->coverPath) : 0;
+
+    if (cover && !cover->isNull()) {
+        QSize scaled = cover->size();
+        scaled.scale(artArea.size().toSize(), Qt::KeepAspectRatio);
+        const QRectF target(artArea.left() + (artArea.width() - scaled.width()) * 0.5,
+                            artArea.top() + (artArea.height() - scaled.height()) * 0.5,
+                            scaled.width(), scaled.height());
+        p.drawPixmap(target, *cover, QRectF(0.0, 0.0, cover->width(), cover->height()));
+        p.fillRect(artArea, QColor(255,255,255,10));
+    } else {
+        QLinearGradient bg(rect.topLeft(), rect.bottomRight());
+        bg.setColorAt(0.0, a1[index % 6]);
+        bg.setColorAt(0.58, a2[index % 6]);
+        bg.setColorAt(1.0, a3[index % 6]);
+        p.fillRect(artArea, bg);
+    }
+
+    QLinearGradient topSpec(rect.left(), rect.top(), rect.left(), rect.top() + rect.height() * 0.28);
+    topSpec.setColorAt(0.0, QColor(255,255,255,24));
+    topSpec.setColorAt(1.0, QColor(255,255,255,0));
+    p.fillRect(QRectF(rect.left()+1.0, rect.top()+1.0, rect.width()-2.0, rect.height()*0.22), topSpec);
+
+    p.setClipping(false);
+    p.setPen(QPen(QColor(255, 248, 231, static_cast<int>(28 + 120 * selection)), 1.0));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(rect, radius, radius);
+
+    QLinearGradient labelGrad(rect.left(), rect.bottom() - labelH, rect.left(), rect.bottom());
+    labelGrad.setColorAt(0.0, QColor(5,8,14,60));
+    labelGrad.setColorAt(1.0, QColor(5,8,14,248));
+    p.fillRect(QRectF(rect.left()+1.0, rect.bottom()-labelH, rect.width()-2.0, labelH-1.0), labelGrad);
+
+    if (game) {
         p.setFont(fontForPixelSize(static_cast<int>(11.0 + 2.0 * selection), QFont::Normal));
         p.setPen(QColor(255,248,231,238));
         p.drawText(QRectF(rect.left()+9.0, rect.bottom()-labelH, rect.width()-18.0, labelH),
-                   Qt::AlignLeft | Qt::AlignVCenter, games[index].title);
+                   Qt::AlignLeft | Qt::AlignVCenter, game->title);
     }
     p.restore();
 }

@@ -53,6 +53,7 @@ SOURCES += \
     src/background_settings.cpp \
     src/rom_scanner.cpp \
     src/rom_header_detector.cpp \
+    src/screenscraper_client.cpp \
     src/ui_model.cpp
 
 HEADERS += \
@@ -67,6 +68,7 @@ HEADERS += \
     src/background_settings.h \
     src/rom_scanner.h \
     src/rom_header_detector.h \
+    src/screenscraper_client.h \
     src/ui_model.h
 
 RESOURCES += resources.qrc
