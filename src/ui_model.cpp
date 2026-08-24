@@ -1,7 +1,9 @@
 #include "ui_model.h"
 #include "rom_scanner.h"
+#include "rom_header_detector.h"
 #include <QDir>
 #include <QFileInfo>
+#include <algorithm>
 
 namespace {
 QStringList &detectedStoresStorage()
@@ -13,6 +15,59 @@ QStringList &unknownRomsStorage()
 {
     static QStringList paths;
     return paths;
+}
+QVector<KadiaGameInfo> &detectedGamesStorage()
+{
+    static QVector<KadiaGameInfo> games;
+    return games;
+}
+QString &activeGameFilterStorage()
+{
+    static QString filter = QStringLiteral("All Games");
+    return filter;
+}
+int &gameLibraryRevisionStorage()
+{
+    static int revision = 0;
+    return revision;
+}
+
+static bool gameMatchesFilter(const KadiaGameInfo &game, const QString &rawFilter)
+{
+    const QString filter = rawFilter.trimmed();
+    if (filter.isEmpty() || filter == QStringLiteral("All Games") ||
+        filter == QStringLiteral("Game Library") || filter == QStringLiteral("Systems") ||
+        filter == QStringLiteral("Continue") || filter == QStringLiteral("Search") ||
+        filter == QStringLiteral("Last Played") || filter == QStringLiteral("All Favorites") ||
+        filter == QStringLiteral("Favorites"))
+        return true;
+
+    const QString system = game.system;
+    if (system.compare(filter, Qt::CaseInsensitive) == 0)
+        return true;
+    if (filter == QStringLiteral("Nintendo"))
+        return system.startsWith(QStringLiteral("Nintendo"), Qt::CaseInsensitive) ||
+               system.startsWith(QStringLiteral("Game Boy"), Qt::CaseInsensitive);
+    if (filter == QStringLiteral("Sega"))
+        return system.startsWith(QStringLiteral("Sega"), Qt::CaseInsensitive);
+    if (filter == QStringLiteral("PlayStation"))
+        return system.startsWith(QStringLiteral("PlayStation"), Qt::CaseInsensitive);
+    if (filter == QStringLiteral("Xbox"))
+        return system.startsWith(QStringLiteral("Xbox"), Qt::CaseInsensitive);
+    if (filter == QStringLiteral("Atari"))
+        return system.startsWith(QStringLiteral("Atari"), Qt::CaseInsensitive);
+    if (filter == QStringLiteral("NEC"))
+        return system.contains(QStringLiteral("TurboGrafx"), Qt::CaseInsensitive) ||
+               system.contains(QStringLiteral("PC Engine"), Qt::CaseInsensitive);
+    if (filter == QStringLiteral("PSP"))
+        return system == QStringLiteral("PlayStation Portable");
+    if (filter == QStringLiteral("PS Vita"))
+        return system == QStringLiteral("PlayStation Vita");
+    if (filter == QStringLiteral("Game Gear"))
+        return system == QStringLiteral("Sega Game Gear");
+    if (filter == QStringLiteral("Arcade") || filter == QStringLiteral("MAME") || filter == QStringLiteral("FBNeo"))
+        return system == QStringLiteral("Arcade");
+    return false;
 }
 }
 
@@ -35,6 +90,97 @@ void setKadiaUnknownRoms(const QStringList &paths)
     clean.removeDuplicates();
     clean.sort(Qt::CaseInsensitive);
     unknownRomsStorage() = clean;
+}
+
+static bool buildKadiaGameFromPath(const QString &path, KadiaGameInfo *out)
+{
+    if (!out)
+        return false;
+    const RomHeaderInfo header = RomHeaderDetector::detect(path);
+    if (!header.isRom)
+        return false;
+
+    QString system = header.system.simplified();
+    if (system.isEmpty() || system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+        header.confidence < 90) {
+        const QString manualSystem = RomCatalog::classification(path).simplified();
+        if (manualSystem.isEmpty() || manualSystem.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+            manualSystem.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
+            return false;
+        system = manualSystem;
+    }
+
+    QString title = header.title.simplified();
+    if (title.isEmpty())
+        title = header.internalId.simplified();
+    if (title.isEmpty())
+        title = system + QStringLiteral(" ROM");
+
+    QString subtitle = system;
+    if (!header.format.isEmpty())
+        subtitle += QStringLiteral("  -  ") + header.format;
+
+    out->title = title;
+    out->subtitle = subtitle;
+    out->description = QDir::toNativeSeparators(path);
+    out->system = system;
+    out->path = path;
+    return true;
+}
+
+void updateKadiaGameFromPath(const QString &path)
+{
+    QVector<KadiaGameInfo> &games = detectedGamesStorage();
+    int existing = -1;
+    for (int i = 0; i < games.size(); ++i) {
+        if (QDir::cleanPath(games.at(i).path).compare(QDir::cleanPath(path), Qt::CaseInsensitive) == 0) {
+            existing = i;
+            break;
+        }
+    }
+
+    KadiaGameInfo game;
+    if (!buildKadiaGameFromPath(path, &game)) {
+        if (existing >= 0)
+            games.remove(existing);
+        RomCatalog::removeEntry(path);
+        ++gameLibraryRevisionStorage();
+        return;
+    }
+
+    const RomHeaderInfo header = RomHeaderDetector::detect(path);
+    if (!header.system.isEmpty() &&
+        header.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) != 0 &&
+        header.confidence >= 90) {
+        RomCatalog::saveDetectedRom(path, header.system, header.title, header.internalId,
+                                    header.format, header.confidence);
+    }
+    if (existing >= 0)
+        games[existing] = game;
+    else
+        games.push_back(game);
+
+    std::sort(games.begin(), games.end(), [](const KadiaGameInfo &a, const KadiaGameInfo &b) {
+        const int bySystem = a.system.compare(b.system, Qt::CaseInsensitive);
+        if (bySystem != 0)
+            return bySystem < 0;
+        return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+    });
+    ++gameLibraryRevisionStorage();
+}
+
+void refreshKadiaGameLibrary()
+{
+    detectedGamesStorage().clear();
+    const QStringList paths = RomCatalog::recognizedPaths();
+    for (int i = 0; i < paths.size(); ++i)
+        updateKadiaGameFromPath(paths.at(i));
+    ++gameLibraryRevisionStorage();
+}
+
+void setKadiaActiveGameFilter(const QString &filter)
+{
+    activeGameFilterStorage() = filter;
 }
 
 
@@ -115,18 +261,10 @@ const QVector<KadiaSectionInfo> &kadiaSections()
         { QStringLiteral("Unknowns"), QStringLiteral("ROM images awaiting identification"), {
         } },
         { QStringLiteral("Recent"), QStringLiteral("Jump back in"), {
-            { QStringLiteral("Aero Quest"), QStringLiteral(""), QStringLiteral("Aero Quest"), QStringLiteral("Played 18 minutes ago.") },
-            { QStringLiteral("Moon Harbor"), QStringLiteral(""), QStringLiteral("Moon Harbor"), QStringLiteral("Played yesterday.") },
-            { QStringLiteral("Velvet Racer"), QStringLiteral(""), QStringLiteral("Velvet Racer"), QStringLiteral("Played 3 days ago.") },
-            { QStringLiteral("Crystal Circuit"), QStringLiteral(""), QStringLiteral("Crystal Circuit"), QStringLiteral("Played last week.") },
-            { QStringLiteral("Last Played"), QStringLiteral(""), QStringLiteral("Last Played"), QStringLiteral("Open the complete automatic Last Played collection.") },
+            { QStringLiteral("Last Played"), QStringLiteral(""), QStringLiteral("Last Played"), QStringLiteral("Open games with recorded play activity.") },
         } },
         { QStringLiteral("Favorites"), QStringLiteral("Pinned games and media"), {
-            { QStringLiteral("Aero Quest"), QStringLiteral(""), QStringLiteral("Aero Quest"), QStringLiteral("Favorite - Super Nintendo") },
-            { QStringLiteral("Solar Garden"), QStringLiteral(""), QStringLiteral("Solar Garden"), QStringLiteral("Favorite - Game Boy Advance") },
-            { QStringLiteral("Night Signal"), QStringLiteral(""), QStringLiteral("Night Signal"), QStringLiteral("Favorite - PlayStation") },
-            { QStringLiteral("Crystal Circuit"), QStringLiteral(""), QStringLiteral("Crystal Circuit"), QStringLiteral("Favorite - Genesis") },
-            { QStringLiteral("All Favorites"), QStringLiteral(""), QStringLiteral("All Favorites"), QStringLiteral("Open the full Favorites collection.") },
+            { QStringLiteral("All Favorites"), QStringLiteral(""), QStringLiteral("All Favorites"), QStringLiteral("Open games marked as favorites.") },
         } },
         { QStringLiteral("Achievements"), QStringLiteral("RetroAchievements"), {
             { QStringLiteral("RetroAchievements"), QStringLiteral(""), QStringLiteral("RetroAchievements"), QStringLiteral("Enable and configure RetroAchievements integration.") },
@@ -366,13 +504,21 @@ const QVector<KadiaSectionInfo> &kadiaSections()
 
 const QVector<KadiaGameInfo> &kadiaGames()
 {
-    static const QVector<KadiaGameInfo> data = {
-        { QStringLiteral("Aero Quest"), QStringLiteral("1994 - Adventure - 1 Player"), QStringLiteral("A bright console adventure presented inside Mathery Kadia!'s dark Media Center shell.") },
-        { QStringLiteral("Crystal Circuit"), QStringLiteral("1995 - Action - 1 Player"), QStringLiteral("Fast arcade action with a polished 16-bit presentation.") },
-        { QStringLiteral("Moon Harbor"), QStringLiteral("1993 - RPG - 1 Player"), QStringLiteral("A calm nocturnal journey through a strange coastal world.") },
-        { QStringLiteral("Velvet Racer"), QStringLiteral("1996 - Racing - 1-2 Players"), QStringLiteral("Late-night racing with glossy roads and warm dashboard light.") },
-        { QStringLiteral("Solar Garden"), QStringLiteral("2001 - Platformer - 1 Player"), QStringLiteral("A portable adventure full of strange plants and tiny planets.") },
-        { QStringLiteral("Night Signal"), QStringLiteral("1998 - Adventure - 1 Player"), QStringLiteral("An atmospheric mystery built around radio towers and distant lights.") },
-    };
-    return data;
+    static QVector<KadiaGameInfo> filteredGames;
+    static int lastRevision = -1;
+    static QString lastFilter;
+
+    const int revision = gameLibraryRevisionStorage();
+    const QString filter = activeGameFilterStorage();
+    if (revision != lastRevision || filter != lastFilter) {
+        filteredGames.clear();
+        const QVector<KadiaGameInfo> &all = detectedGamesStorage();
+        for (int i = 0; i < all.size(); ++i) {
+            if (gameMatchesFilter(all.at(i), filter))
+                filteredGames.push_back(all.at(i));
+        }
+        lastRevision = revision;
+        lastFilter = filter;
+    }
+    return filteredGames;
 }

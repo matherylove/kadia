@@ -36,6 +36,8 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     resize(m_scene.logicalSize());
     m_scene.setViewportSize(size());
     BackgroundSettings::applyToScene(&m_scene, BackgroundSettings::load());
+    refreshKadiaGameLibrary();
+    setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
 
     m_input.initialize();
 
@@ -255,6 +257,8 @@ void KadiaWindow::runPostStartupChecks()
         m_romScanner = new RomScanner(this);
         connect(m_romScanner, SIGNAL(romDiscovered(QString,QString)),
                 this, SLOT(onRomDiscovered(QString,QString)));
+        connect(m_romScanner, SIGNAL(romRecognized(QString,QString,QString)),
+                this, SLOT(onRomRecognized(QString,QString,QString)));
         m_romScanner->start();
     }
 }
@@ -264,6 +268,18 @@ void KadiaWindow::onRomDiscovered(const QString &path, const QString &hint)
     m_romQueue.enqueue(qMakePair(path, hint));
     if (!m_romDialogActive)
         QTimer::singleShot(0, this, SLOT(showNextRomDialog()));
+}
+
+void KadiaWindow::onRomRecognized(const QString &path, const QString &system, const QString &title)
+{
+    Q_UNUSED(system);
+    Q_UNUSED(title);
+    // The scanner has already persisted the trusted structural detection.
+    // Refreshing the in-memory model makes the game appear immediately while
+    // scanning continues in the background.
+    if (!path.isEmpty())
+        updateKadiaGameFromPath(path);
+    setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
 }
 
 void KadiaWindow::showNextRomDialog()
@@ -277,6 +293,9 @@ void KadiaWindow::showNextRomDialog()
     if (dialog.exec() == QDialog::Accepted && !dialog.selectedSystem().isEmpty()) {
         RomCatalog::saveClassification(candidate.first, dialog.selectedSystem());
         setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
+        if (dialog.selectedSystem().compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) != 0 &&
+            dialog.selectedSystem().compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) != 0)
+            refreshKadiaGameLibrary();
     }
     m_romDialogActive = false;
 

@@ -253,6 +253,9 @@ void KadiaScene::handle(Action action)
         if (gameBrowse || homeGame) {
             m_libraryTitle = selected == QStringLiteral("Systems")
                            ? QStringLiteral("Game Library") : selected;
+            setKadiaActiveGameFilter(m_libraryTitle);
+            m_game = 0;
+            m_previousGame = 0;
             m_library = true;
             m_gameChangeAge = 1.0;
         }
@@ -949,6 +952,27 @@ void KadiaScene::drawLibrary(QPainter &p)
     const qreal y = kHubTop + 310.0;
     const qreal gap = 15.0;
     const qreal viewportW = stripWidth();
+
+    if (games.isEmpty()) {
+        p.save();
+        p.setFont(fontForPixelSize(28, QFont::Light));
+        p.setPen(QColor(255, 248, 231, 218));
+        p.drawText(QRectF(kStripX, y + 18.0, viewportW, 42.0),
+                   Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("No games detected"));
+        p.setFont(fontForPixelSize(13, QFont::Normal));
+        p.setPen(QColor(255, 248, 231, 118));
+        p.drawText(QRectF(kStripX, y + 62.0, viewportW, 52.0),
+                   Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                   QStringLiteral("Kadia did not detect any recognized ROMs for this library."));
+        p.restore();
+        return;
+    }
+
+    if (m_game < 0 || m_game >= games.size()) {
+        m_game = 0;
+        m_previousGame = 0;
+    }
+
     const qreal t = easeOutCubic(qMin<qreal>(1.0, m_gameChangeAge / 0.18));
 
     QVector<qreal> widths;

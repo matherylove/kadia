@@ -17,10 +17,17 @@ namespace RomCatalog
 {
     bool isKnown(const QString &path);
     void saveClassification(const QString &path, const QString &system);
+    void saveDetectedRom(const QString &path, const QString &system, const QString &title,
+                         const QString &internalId, const QString &format, int confidence);
+    void removeEntry(const QString &path);
     QString classification(const QString &path);
     QString internalTitle(const QString &path);
+    QString internalId(const QString &path);
+    QString format(const QString &path);
+    bool isAutomaticDetection(const QString &path);
     QStringList systems();
     QStringList pathsForClassification(const QString &classification);
+    QStringList recognizedPaths();
 }
 
 class RomScanner : public QThread
@@ -32,7 +39,12 @@ public:
     void requestStop();
 
 signals:
+    // Emitted only when the internal structure is ROM-like but Kadia cannot
+    // determine the console reliably.  Only these files require a dialog.
     void romDiscovered(const QString &path, const QString &hint);
+    // Reliable header detections are catalogued automatically and sent here so
+    // the GUI can refresh immediately without interrupting the user.
+    void romRecognized(const QString &path, const QString &system, const QString &title);
     void scanStatus(const QString &text);
     void scanFinished();
 

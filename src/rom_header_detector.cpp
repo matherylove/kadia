@@ -79,6 +79,70 @@ static bool mostlyPrintable(const QByteArray &bytes)
     return meaningful > 0 && printable * 100 / meaningful >= 72;
 }
 
+static bool isClearlyNonRomFile(QFile &file)
+{
+    // Before trying permissive cartridge heuristics, reject well-known non-ROM
+    // containers by their real binary signatures.  This is intentionally not
+    // extension based: a WAV renamed to .bin still begins with RIFF/RF64+WAVE.
+    const QByteArray h = readAt(file, 0, 4096);
+    if (h.size() < 12)
+        return false;
+
+    const QByteArray four = h.left(4);
+    if ((four == "RIFF" || four == "RF64") && h.mid(8, 4) == "WAVE")
+        return true;
+    if (four == "FORM" && (h.mid(8, 4) == "AIFF" || h.mid(8, 4) == "AIFC"))
+        return true;
+    if (four == "OggS" || four == "fLaC" || h.left(3) == "ID3")
+        return true;
+
+    if (h.left(8) == QByteArray("\x89PNG\r\n\x1a\n", 8) ||
+        h.left(3) == QByteArray("\xff\xd8\xff", 3) ||
+        h.left(6) == "GIF87a" || h.left(6) == "GIF89a" ||
+        h.left(2) == "BM")
+        return true;
+
+    if (h.left(4) == "PK\x03\x04" || h.left(4) == "PK\x05\x06" ||
+        h.left(6) == QByteArray("7z\xbc\xaf\x27\x1c", 6) ||
+        h.left(7) == "Rar!\x1a\x07" ||
+        h.left(2) == QByteArray("\x1f\x8b", 2) ||
+        h.left(3) == "BZh" ||
+        h.left(6) == QByteArray("\xfd" "7zXZ\x00", 6))
+        return true;
+
+    if (h.left(5) == "%PDF-" || h.left(4) == QByteArray("\x7f" "ELF", 4) ||
+        h.left(16) == QByteArray("SQLite format 3\0", 16))
+        return true;
+
+    // PE/DOS programs are software executables, not console ROM images.
+    if (h.left(2) == "MZ")
+        return true;
+
+    // MP4/MOV-family media and Matroska/WebM.
+    if (h.size() >= 12 && h.mid(4, 4) == "ftyp")
+        return true;
+    if (h.left(4) == QByteArray("\x1a\x45\xdf\xa3", 4))
+        return true;
+
+    // Plain text/configuration files can occasionally satisfy weak printable
+    // header heuristics.  Reject them when the first block is overwhelmingly
+    // printable and contains ordinary line structure.
+    int printable = 0;
+    int controls = 0;
+    for (int i = 0; i < h.size(); ++i) {
+        const uchar c = static_cast<uchar>(h.at(i));
+        if (c == '\r' || c == '\n' || c == '\t' || (c >= 0x20 && c <= 0x7e))
+            ++printable;
+        else if (c != 0)
+            ++controls;
+    }
+    if (h.size() >= 256 && printable * 100 / h.size() >= 94 && controls < h.size() / 50 &&
+        (h.contains('\n') || h.contains('\r')))
+        return true;
+
+    return false;
+}
+
 static RomHeaderInfo makeInfo(const QString &system, const QString &title,
                               const QString &format, int confidence,
                               const QString &internalId = QString())
@@ -257,6 +321,13 @@ static RomHeaderInfo detectSnesAt(QFile &file, qint64 offset)
 static RomHeaderInfo detectSnes(QFile &file)
 {
     const qint64 size = file.size();
+    // Real SNES cartridge dumps are normally bank-aligned, optionally with a
+    // 512-byte copier header.  Requiring that structure removes accidental
+    // matches inside arbitrary audio/data files while retaining standard dumps.
+    if (size < 32 * 1024 ||
+        ((size % 0x8000) != 0 && (size < 512 || ((size - 512) % 0x8000) != 0)))
+        return RomHeaderInfo();
+
     const qint64 offsets[] = {
         0x7FC0, 0xFFC0, 0x40FFC0,
         0x7FC0 + 512, 0xFFC0 + 512, 0x40FFC0 + 512
@@ -602,6 +673,9 @@ RomHeaderInfo detect(const QString &path)
     // signatures and metadata, never on the filename or extension.
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
+        return RomHeaderInfo();
+
+    if (isClearlyNonRomFile(file))
         return RomHeaderInfo();
 
     const qint64 size = file.size();

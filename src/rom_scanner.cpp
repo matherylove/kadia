@@ -208,6 +208,7 @@ void saveClassification(const QString &path, const QString &system)
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
     s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
     s.setValue(QStringLiteral("classification"), system);
+    s.setValue(QStringLiteral("classificationSource"), QStringLiteral("manual"));
     if (header.isRom) {
         s.setValue(QStringLiteral("detectedSystem"), header.system);
         s.setValue(QStringLiteral("internalTitle"), header.title);
@@ -216,6 +217,32 @@ void saveClassification(const QString &path, const QString &system)
         s.setValue(QStringLiteral("confidence"), header.confidence);
     }
     s.endGroup(); s.sync();
+}
+
+void saveDetectedRom(const QString &path, const QString &system, const QString &title,
+                     const QString &internalIdValue, const QString &formatValue, int confidence)
+{
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
+    s.setValue(QStringLiteral("classification"), system);
+    s.setValue(QStringLiteral("classificationSource"), QStringLiteral("automatic"));
+    s.setValue(QStringLiteral("detectedSystem"), system);
+    s.setValue(QStringLiteral("internalTitle"), title.simplified());
+    s.setValue(QStringLiteral("internalId"), internalIdValue.simplified());
+    s.setValue(QStringLiteral("format"), formatValue.simplified());
+    s.setValue(QStringLiteral("confidence"), confidence);
+    s.endGroup();
+    s.sync();
+}
+
+void removeEntry(const QString &path)
+{
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files"));
+    s.remove(keyForPath(path));
+    s.endGroup();
+    s.sync();
 }
 
 QString internalTitle(const QString &path)
@@ -228,6 +255,33 @@ QString internalTitle(const QString &path)
         return title;
     const RomHeaderInfo header = RomHeaderDetector::detect(path);
     return header.title;
+}
+
+QString internalId(const QString &path)
+{
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    const QString value = s.value(QStringLiteral("internalId")).toString();
+    s.endGroup();
+    return value;
+}
+
+QString format(const QString &path)
+{
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    const QString value = s.value(QStringLiteral("format")).toString();
+    s.endGroup();
+    return value;
+}
+
+bool isAutomaticDetection(const QString &path)
+{
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    const QString source = s.value(QStringLiteral("classificationSource")).toString();
+    s.endGroup();
+    return source.compare(QStringLiteral("automatic"), Qt::CaseInsensitive) == 0;
 }
 
 QString classification(const QString &path)
@@ -304,6 +358,30 @@ QStringList pathsForClassification(const QString &wanted)
     return paths;
 }
 
+QStringList recognizedPaths()
+{
+    QStringList paths;
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files"));
+    const QStringList groups = s.childGroups();
+    for (int i = 0; i < groups.size(); ++i) {
+        s.beginGroup(groups[i]);
+        const QString classificationValue = s.value(QStringLiteral("classification")).toString();
+        const QString path = QDir::fromNativeSeparators(s.value(QStringLiteral("path")).toString());
+        s.endGroup();
+        if (classificationValue.isEmpty() ||
+            classificationValue.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+            classificationValue.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
+            continue;
+        if (!path.isEmpty() && QFileInfo(path).exists())
+            paths << path;
+    }
+    s.endGroup();
+    paths.removeDuplicates();
+    paths.sort(Qt::CaseInsensitive);
+    return paths;
+}
+
 }
 
 RomScanner::RomScanner(QObject *parent) : QThread(parent), m_stop(false) {}
@@ -353,18 +431,56 @@ void RomScanner::run()
                     continue;
 
                 const QString path = fi.absoluteFilePath();
-                if (RomCatalog::isKnown(path))
-                    continue;
 
-                // Do not trust the extension or filename.  Every candidate is
-                // identified from console-specific binary signatures, internal
-                // headers and disc metadata.  Non-ROM files simply fail all
-                // parsers and are ignored.
+                // Existing ignored/unknown choices are never prompted again.
+                // Existing recognized entries are revalidated with the current
+                // structural detector so old false positives disappear after a
+                // detector update (for example RIFF/WAVE files once mistaken
+                // for a cartridge by weak heuristics).
+                if (RomCatalog::isKnown(path)) {
+                    const QString knownSystem = RomCatalog::classification(path);
+                    if (knownSystem.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+                        knownSystem.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
+                        continue;
+
+                    const RomHeaderInfo knownHeader = RomHeaderDetector::detect(path);
+                    if (!knownHeader.isRom) {
+                        RomCatalog::removeEntry(path);
+                        emit romRecognized(path, QString(), QString());
+                    } else if (RomCatalog::isAutomaticDetection(path)) {
+                        if (knownHeader.system.isEmpty() ||
+                            knownHeader.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) == 0 ||
+                            knownHeader.confidence < 90) {
+                            RomCatalog::removeEntry(path);
+                            emit romRecognized(path, QString(), QString());
+                        } else {
+                            RomCatalog::saveDetectedRom(path, knownHeader.system, knownHeader.title,
+                                                        knownHeader.internalId, knownHeader.format,
+                                                        knownHeader.confidence);
+                        }
+                    }
+                    continue;
+                }
+
+                // Recognition is entirely structural.  The extension and the
+                // filename are never used to decide whether this is a ROM.
                 const RomHeaderInfo header = RomHeaderDetector::detect(path);
                 if (!header.isRom)
                     continue;
 
-                emit romDiscovered(path, header.system);
+                const bool consoleKnown = !header.system.isEmpty() &&
+                    header.system.compare(QStringLiteral("Unknown"), Qt::CaseInsensitive) != 0 &&
+                    header.confidence >= 90;
+
+                if (consoleKnown) {
+                    RomCatalog::saveDetectedRom(path, header.system, header.title,
+                                                header.internalId, header.format,
+                                                header.confidence);
+                    emit romRecognized(path, header.system, header.title);
+                } else {
+                    // Only unresolved structural ROM detections reach the user.
+                    emit romDiscovered(path, QStringLiteral("Unknown"));
+                }
             }
         }
     }

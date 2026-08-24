@@ -43,6 +43,7 @@ protected:
 private slots:
     void frameTick();
     void onRomDiscovered(const QString &path, const QString &hint);
+    void onRomRecognized(const QString &path, const QString &system, const QString &title);
     void showNextRomDialog();
 
 private:
