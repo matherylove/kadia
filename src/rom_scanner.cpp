@@ -8,6 +8,7 @@
 #include <QCloseEvent>
 #include <QDesktopWidget>
 #include <QDateTime>
+#include <QDataStream>
 #include <QElapsedTimer>
 #include <QDir>
 #include <QFileInfo>
@@ -19,11 +20,13 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QProgressBar>
+#include <QSaveFile>
 #include <QSettings>
 #include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <functional>
 
 namespace {
 
@@ -35,12 +38,22 @@ static QString catalogPath()
     return QDir(base).filePath(QStringLiteral("rom-catalog.ini"));
 }
 
-static QString scanCachePath()
+static QString scanCacheDirectory()
 {
     QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (base.isEmpty()) base = QDir::homePath() + QStringLiteral("/.mathery-kadia");
     QDir().mkpath(base);
-    return QDir(base).filePath(QStringLiteral("rom-scan-cache.ini"));
+    return base;
+}
+
+static QString scanCachePath()
+{
+    return QDir(scanCacheDirectory()).filePath(QStringLiteral("rom-scan-cache.dat"));
+}
+
+static QString legacyScanCachePath()
+{
+    return QDir(scanCacheDirectory()).filePath(QStringLiteral("rom-scan-cache.ini"));
 }
 
 static QString keyForPath(const QString &path)
@@ -79,7 +92,8 @@ struct ScanCacheEntry
     int confidence;
 };
 
-static const int kScanCacheVersion = 2;
+static const int kScanCacheVersion = 3;
+static const quint32 kScanCacheMagic = 0x4B52434BU; // "KRCK"
 
 static qint64 fileModifiedMs(const QFileInfo &fi)
 {
@@ -94,11 +108,12 @@ static bool cacheMatchesFile(const ScanCacheEntry &entry, const QFileInfo &fi)
            entry.size == fi.size() && entry.modifiedMs == modified;
 }
 
-static QHash<QString, ScanCacheEntry> loadScanCache()
+static QHash<QString, ScanCacheEntry> loadLegacyScanCache()
 {
     QHash<QString, ScanCacheEntry> cache;
-    QSettings s(scanCachePath(), QSettings::IniFormat);
-    if (s.value(QStringLiteral("meta/version"), 0).toInt() != kScanCacheVersion)
+    QSettings s(legacyScanCachePath(), QSettings::IniFormat);
+    const int legacyVersion = s.value(QStringLiteral("meta/version"), 0).toInt();
+    if (legacyVersion <= 0)
         return cache;
 
     s.beginGroup(QStringLiteral("files"));
@@ -125,32 +140,88 @@ static QHash<QString, ScanCacheEntry> loadScanCache()
     return cache;
 }
 
-static void saveScanCache(const QHash<QString, ScanCacheEntry> &cache)
+static QHash<QString, ScanCacheEntry> loadScanCache()
 {
-    QSettings s(scanCachePath(), QSettings::IniFormat);
-    s.clear();
-    s.setValue(QStringLiteral("meta/version"), kScanCacheVersion);
-    s.beginGroup(QStringLiteral("files"));
+    QHash<QString, ScanCacheEntry> cache;
+    QFile f(scanCachePath());
+    if (!f.open(QIODevice::ReadOnly))
+        return loadLegacyScanCache();
 
+    QDataStream in(&f);
+    in.setVersion(QDataStream::Qt_5_0);
+
+    quint32 magic = 0;
+    qint32 version = 0;
+    qint32 count = 0;
+    in >> magic >> version >> count;
+    if (in.status() != QDataStream::Ok || magic != kScanCacheMagic ||
+        version != kScanCacheVersion || count < 0 || count > 10000000) {
+        f.close();
+        return loadLegacyScanCache();
+    }
+
+    cache.reserve(count);
+    for (qint32 i = 0; i < count && in.status() == QDataStream::Ok; ++i) {
+        ScanCacheEntry entry;
+        qint32 confidence = 0;
+        in >> entry.path >> entry.size >> entry.modifiedMs >> entry.state
+           >> entry.system >> entry.title >> entry.internalId >> entry.format
+           >> confidence;
+        entry.confidence = int(confidence);
+        const QString key = normalizedScanPath(entry.path);
+        if (!key.isEmpty() && !entry.state.isEmpty())
+            cache.insert(key, entry);
+    }
+
+    if (in.status() != QDataStream::Ok)
+        cache.clear();
+    return cache;
+}
+
+static bool saveScanCache(const QHash<QString, ScanCacheEntry> &cache,
+                          const std::function<void(int)> &progress)
+{
+    QSaveFile f(scanCachePath());
+    if (!f.open(QIODevice::WriteOnly))
+        return false;
+
+    QDataStream out(&f);
+    out.setVersion(QDataStream::Qt_5_0);
+    out << quint32(kScanCacheMagic) << qint32(kScanCacheVersion) << qint32(cache.size());
+
+    int written = 0;
+    const int total = qMax(1, cache.size());
     QHash<QString, ScanCacheEntry>::const_iterator it = cache.constBegin();
     for (; it != cache.constEnd(); ++it) {
         const ScanCacheEntry &entry = it.value();
-        if (entry.path.isEmpty() || entry.state.isEmpty())
-            continue;
-        s.beginGroup(keyForPath(entry.path));
-        s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(entry.path));
-        s.setValue(QStringLiteral("size"), entry.size);
-        s.setValue(QStringLiteral("modifiedMs"), entry.modifiedMs);
-        s.setValue(QStringLiteral("state"), entry.state);
-        s.setValue(QStringLiteral("system"), entry.system);
-        s.setValue(QStringLiteral("title"), entry.title);
-        s.setValue(QStringLiteral("internalId"), entry.internalId);
-        s.setValue(QStringLiteral("format"), entry.format);
-        s.setValue(QStringLiteral("confidence"), entry.confidence);
-        s.endGroup();
+        out << entry.path << entry.size << entry.modifiedMs << entry.state
+            << entry.system << entry.title << entry.internalId << entry.format
+            << qint32(entry.confidence);
+        ++written;
+
+        // Binary serialization is much faster than rewriting thousands of INI
+        // groups. Still yield periodically so the render/message thread keeps
+        // getting CPU even on old single/dual-core XP-era systems.
+        if ((written & 511) == 0 || written == total) {
+            if (progress)
+                progress(qBound(0, (written * 100) / total, 100));
+            QThread::yieldCurrentThread();
+        }
     }
-    s.endGroup();
-    s.sync();
+
+    if (out.status() != QDataStream::Ok) {
+        f.cancelWriting();
+        return false;
+    }
+    if (!f.commit())
+        return false;
+
+    // The old INI cache is only migration input. Removing it avoids parsing or
+    // rewriting that large text report on future launches.
+    QFile::remove(legacyScanCachePath());
+    if (progress)
+        progress(100);
+    return true;
 }
 
 static ScanCacheEntry makeCacheEntry(const QFileInfo &fi, const QString &state,
@@ -859,9 +930,14 @@ void RomScanner::run()
     const bool cancelled = m_stop.loadAcquire() != 0;
     if (!cancelled) {
         const QString lastPath = total > 0 ? candidates.last() : QStringLiteral("ROM scan cache");
-        emit fileProgress(lastPath, 100, 100,
-                          QStringLiteral("Saving scan results"), total, total);
-        saveScanCache(scanCache);
+        emit fileProgress(lastPath, 0, 100,
+                          QStringLiteral("Saving incremental scan cache"), total, total);
+        saveScanCache(scanCache, [this, lastPath, total](int percent) {
+            if (m_stop.loadAcquire())
+                return;
+            emit fileProgress(lastPath, percent, 100,
+                              QStringLiteral("Saving incremental scan cache"), total, total);
+        });
     }
 
     Q_UNUSED(cachedSkipped);
