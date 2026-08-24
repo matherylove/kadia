@@ -663,14 +663,70 @@ static RomHeaderInfo detectXboxDisc(QFile &file)
 
 namespace RomHeaderDetector {
 
+bool isCandidatePath(const QString &path)
+{
+    // Stage 1 is intentionally extension-only.  QFileInfo reads path metadata;
+    // it does not open or inspect the file contents.  This prevents Kadia from
+    // probing arbitrary documents, media, DLLs, WAV files, etc. while walking
+    // a drive.  Only plausible console/computer game-image extensions proceed
+    // to the structural header detector below.
+    const QString ext = QFileInfo(path).suffix().toLower();
+    if (ext.isEmpty())
+        return false;
+
+    static const char *const extensions[] = {
+        // Nintendo / common cartridges
+        "nes", "unf", "unif", "sfc", "smc", "fig", "swc",
+        "n64", "z64", "v64", "gb", "gbc", "gba", "nds",
+        "3ds", "cia", "wad", "wbfs", "rvz", "gcz", "wud",
+        "wux", "wua",
+
+        // Sega
+        "md", "gen", "smd", "sms", "gg", "32x", "gdi", "cdi",
+
+        // Sony / optical and portable images
+        "pbp", "cso", "dax", "jso", "zso",
+
+        // Switch
+        "xci", "nsp", "nca",
+
+        // NEC / SNK / Bandai / Atari and other cartridges
+        "pce", "sgx", "ws", "wsc", "ngp", "ngc",
+        "a26", "a52", "a78", "lnx", "lynx", "j64", "jag",
+        "col", "int", "vec",
+
+        // Home computers / floppy and tape images
+        "crt", "d64", "d71", "d81", "t64", "tap", "prg",
+        "adf", "adz", "dms", "ipf", "hdf", "dsk", "atr", "xfd",
+        "st", "stx", "msa",
+
+        // Ambiguous raw/disc containers. These are allowed to reach the
+        // structural detector, which must still prove that they are games.
+        "iso", "bin", "cue", "chd", "img", "mdf", "mds", "nrg",
+        "ccd", "sub", "ecm", "isz", "raw", "rom"
+    };
+
+    for (unsigned int i = 0; i < sizeof(extensions) / sizeof(extensions[0]); ++i) {
+        if (ext == QString::fromLatin1(extensions[i]))
+            return true;
+    }
+    return false;
+}
+
 RomHeaderInfo detect(const QString &path)
 {
+    // Never open a file unless its extension is a plausible ROM/game-image
+    // extension.  The extension is only a performance/safety prefilter; it does
+    // NOT decide the console or whether the file is actually a ROM.
+    if (!isCandidatePath(path))
+        return RomHeaderInfo();
+
     QFileInfo fi(path);
     if (!fi.exists() || !fi.isFile() || fi.size() < 64)
         return RomHeaderInfo();
 
-    // Reading every file is deliberate: recognition is based on internal
-    // signatures and metadata, never on the filename or extension.
+    // Stage 2: once the cheap extension prefilter passes, identify the format
+    // solely from internal signatures/headers.
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
         return RomHeaderInfo();

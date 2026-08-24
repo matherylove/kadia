@@ -432,6 +432,12 @@ void RomScanner::run()
 
                 const QString path = fi.absoluteFilePath();
 
+                // Stage 1: extension prefilter only. This is intentionally done
+                // before any QFile/content inspection, so Kadia does not open
+                // every file on the machine looking for ROM signatures.
+                if (!RomHeaderDetector::isCandidatePath(path))
+                    continue;
+
                 // Existing ignored/unknown choices are never prompted again.
                 // Existing recognized entries are revalidated with the current
                 // structural detector so old false positives disappear after a
