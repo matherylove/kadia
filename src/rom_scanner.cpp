@@ -1,4 +1,5 @@
 #include "rom_scanner.h"
+#include "rom_header_detector.h"
 
 #include <QApplication>
 #include <QByteArray>
@@ -29,45 +30,6 @@ static QString catalogPath()
 static QString keyForPath(const QString &path)
 {
     return QString::fromLatin1(QCryptographicHash::hash(QDir::cleanPath(path).toLower().toUtf8(), QCryptographicHash::Sha1).toHex());
-}
-
-static QString hintForSuffix(const QString &suffix)
-{
-    const QString s = suffix.toLower();
-    if (s == QStringLiteral("nes")) return QStringLiteral("Nintendo Entertainment System");
-    if (s == QStringLiteral("sfc") || s == QStringLiteral("smc")) return QStringLiteral("Super Nintendo");
-    if (s == QStringLiteral("n64") || s == QStringLiteral("z64") || s == QStringLiteral("v64")) return QStringLiteral("Nintendo 64");
-    if (s == QStringLiteral("gb")) return QStringLiteral("Game Boy");
-    if (s == QStringLiteral("gbc")) return QStringLiteral("Game Boy Color");
-    if (s == QStringLiteral("gba")) return QStringLiteral("Game Boy Advance");
-    if (s == QStringLiteral("nds")) return QStringLiteral("Nintendo DS");
-    if (s == QStringLiteral("3ds") || s == QStringLiteral("cia")) return QStringLiteral("Nintendo 3DS");
-    if (s == QStringLiteral("md") || s == QStringLiteral("gen") || s == QStringLiteral("smd")) return QStringLiteral("Sega Genesis / Mega Drive");
-    if (s == QStringLiteral("sms")) return QStringLiteral("Sega Master System");
-    if (s == QStringLiteral("gg")) return QStringLiteral("Sega Game Gear");
-    if (s == QStringLiteral("gdi") || s == QStringLiteral("cdi")) return QStringLiteral("Sega Dreamcast");
-    if (s == QStringLiteral("pce")) return QStringLiteral("PC Engine / TurboGrafx-16");
-    if (s == QStringLiteral("ws")) return QStringLiteral("WonderSwan");
-    if (s == QStringLiteral("wsc")) return QStringLiteral("WonderSwan Color");
-    if (s == QStringLiteral("ngp")) return QStringLiteral("Neo Geo Pocket");
-    if (s == QStringLiteral("ngc")) return QStringLiteral("Neo Geo Pocket Color");
-    if (s == QStringLiteral("a26")) return QStringLiteral("Atari 2600");
-    if (s == QStringLiteral("a52")) return QStringLiteral("Atari 5200");
-    if (s == QStringLiteral("a78")) return QStringLiteral("Atari 7800");
-    if (s == QStringLiteral("lnx") || s == QStringLiteral("lynx")) return QStringLiteral("Atari Lynx");
-    if (s == QStringLiteral("cso")) return QStringLiteral("PlayStation Portable");
-    if (s == QStringLiteral("xci") || s == QStringLiteral("nsp")) return QStringLiteral("Nintendo Switch");
-    if (s == QStringLiteral("wad")) return QStringLiteral("Nintendo Wii");
-    if (s == QStringLiteral("wbfs") || s == QStringLiteral("rvz")) return QStringLiteral("Nintendo Wii / GameCube");
-    if (s == QStringLiteral("iso") || s == QStringLiteral("bin") || s == QStringLiteral("cue") ||
-        s == QStringLiteral("rom") || s == QStringLiteral("chd") || s == QStringLiteral("img") ||
-        s == QStringLiteral("mdf") || s == QStringLiteral("pbp")) return QStringLiteral("Unknown");
-    return QString();
-}
-
-static bool candidateSuffix(const QString &suffix)
-{
-    return !hintForSuffix(suffix).isEmpty();
 }
 
 static QString normalizedScanPath(const QString &path)
@@ -241,11 +203,31 @@ bool isKnown(const QString &path)
 
 void saveClassification(const QString &path, const QString &system)
 {
+    const RomHeaderInfo header = RomHeaderDetector::detect(path);
     QSettings s(catalogPath(), QSettings::IniFormat);
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
     s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
     s.setValue(QStringLiteral("classification"), system);
+    if (header.isRom) {
+        s.setValue(QStringLiteral("detectedSystem"), header.system);
+        s.setValue(QStringLiteral("internalTitle"), header.title);
+        s.setValue(QStringLiteral("internalId"), header.internalId);
+        s.setValue(QStringLiteral("format"), header.format);
+        s.setValue(QStringLiteral("confidence"), header.confidence);
+    }
     s.endGroup(); s.sync();
+}
+
+QString internalTitle(const QString &path)
+{
+    QSettings s(catalogPath(), QSettings::IniFormat);
+    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
+    QString title = s.value(QStringLiteral("internalTitle")).toString();
+    s.endGroup();
+    if (!title.isEmpty())
+        return title;
+    const RomHeaderInfo header = RomHeaderDetector::detect(path);
+    return header.title;
 }
 
 QString classification(const QString &path)
@@ -335,7 +317,7 @@ void RomScanner::run()
 
     for (int d = 0; d < drives.size() && !m_stop; ++d) {
         const QString root = drives[d].absoluteFilePath();
-        emit scanStatus(QStringLiteral("Scanning %1 for ROM files...").arg(QDir::toNativeSeparators(root)));
+        emit scanStatus(QStringLiteral("Scanning %1 for ROM headers...").arg(QDir::toNativeSeparators(root)));
 
         // Use an explicit directory stack instead of QDirIterator::Subdirectories.
         // QDirIterator cannot prune a subtree after entering it, while the stack
@@ -367,13 +349,22 @@ void RomScanner::run()
                     continue;
                 }
 
-                if (!fi.isFile() || !candidateSuffix(fi.suffix()))
+                if (!fi.isFile())
                     continue;
 
                 const QString path = fi.absoluteFilePath();
                 if (RomCatalog::isKnown(path))
                     continue;
-                emit romDiscovered(path, hintForSuffix(fi.suffix()));
+
+                // Do not trust the extension or filename.  Every candidate is
+                // identified from console-specific binary signatures, internal
+                // headers and disc metadata.  Non-ROM files simply fail all
+                // parsers and are ignored.
+                const RomHeaderInfo header = RomHeaderDetector::detect(path);
+                if (!header.isRom)
+                    continue;
+
+                emit romDiscovered(path, header.system);
             }
         }
     }
@@ -401,7 +392,13 @@ RomClassificationDialog::RomClassificationDialog(const QString &path, const QStr
     QFont pf = m_pathLabel->font(); pf.setPixelSize(12); m_pathLabel->setFont(pf);
 
     m_hintLabel->setObjectName(QStringLiteral("dialogHint"));
-    m_hintLabel->setText(QStringLiteral("Detected hint: %1. Confirm the console, choose Unknown for ambiguous images, or None to discard this file permanently.").arg(hint));
+    const RomHeaderInfo header = RomHeaderDetector::detect(path);
+    const QString detectedTitle = header.title.isEmpty()
+        ? QStringLiteral("No standardized internal title is present in this ROM format")
+        : header.title;
+    const QString detectedFormat = header.format.isEmpty() ? QStringLiteral("ROM image") : header.format;
+    m_hintLabel->setText(QStringLiteral("Internal title: %1\nDetected system: %2  |  Format: %3\nConfirm the console, choose Unknown if the detection is ambiguous, or None to discard this file permanently.")
+                         .arg(detectedTitle, hint, detectedFormat));
     m_hintLabel->setWordWrap(true);
     QFont hf = m_hintLabel->font(); hf.setPixelSize(13); m_hintLabel->setFont(hf);
 

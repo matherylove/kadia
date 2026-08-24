@@ -18,6 +18,7 @@ namespace RomCatalog
     bool isKnown(const QString &path);
     void saveClassification(const QString &path, const QString &system);
     QString classification(const QString &path);
+    QString internalTitle(const QString &path);
     QStringList systems();
     QStringList pathsForClassification(const QString &classification);
 }

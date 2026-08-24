@@ -1,4 +1,5 @@
 #include "ui_model.h"
+#include "rom_scanner.h"
 #include <QDir>
 #include <QFileInfo>
 
@@ -350,7 +351,9 @@ const QVector<KadiaSectionInfo> &kadiaSections()
                 for (int r = 0; r < unknownRomsStorage().size(); ++r) {
                     const QString path = unknownRomsStorage()[r];
                     QFileInfo fi(path);
-                    romTiles.push_back(KadiaTileInfo{fi.fileName(), QString(), fi.completeBaseName(),
+                    const QString internal = RomCatalog::internalTitle(path);
+                    const QString display = internal.isEmpty() ? fi.completeBaseName() : internal;
+                    romTiles.push_back(KadiaTileInfo{display, QString(), display,
                         QStringLiteral("Unclassified ROM image: %1").arg(QDir::toNativeSeparators(path))});
                 }
                 filtered[sidx].tiles = romTiles;
