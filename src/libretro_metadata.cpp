@@ -190,6 +190,16 @@ static bool httpGet(const QString &url, QByteArray *data, int *statusCode)
     if (!internet)
         return false;
 
+    // WinINet defaults can wait for a very long time on DNS/TLS/network errors.
+    // Keep metadata optional and bounded so a dead connection never looks like a
+    // permanently stuck worker. These options are available on Windows XP.
+    DWORD connectTimeout = 8000;
+    DWORD sendTimeout = 10000;
+    DWORD receiveTimeout = 15000;
+    InternetSetOptionW(internet, INTERNET_OPTION_CONNECT_TIMEOUT, &connectTimeout, sizeof(connectTimeout));
+    InternetSetOptionW(internet, INTERNET_OPTION_SEND_TIMEOUT, &sendTimeout, sizeof(sendTimeout));
+    InternetSetOptionW(internet, INTERNET_OPTION_RECEIVE_TIMEOUT, &receiveTimeout, sizeof(receiveTimeout));
+
     const DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
                         INTERNET_FLAG_KEEP_CONNECTION | INTERNET_FLAG_NO_UI |
                         INTERNET_FLAG_PRAGMA_NOCACHE | INTERNET_FLAG_SECURE;
@@ -375,24 +385,34 @@ static bool ensureDatabase(const SystemInfo &info, LibretroDb *db, bool *network
 {
     if (networkAvailable)
         *networkAvailable = true;
+
     const QString localPath = QDir(databaseCacheDir()).filePath(safeLocalName(info.datPath));
-    const QFileInfo cachedInfo(localPath);
-    const bool stale = cachedInfo.exists() && cachedInfo.lastModified().daysTo(QDateTime::currentDateTime()) >= 7;
-    if (!cachedInfo.exists() || cachedInfo.size() < 100 || stale) {
+    QFileInfo cachedInfo(localPath);
+    const bool hasUsableCache = cachedInfo.exists() && cachedInfo.size() >= 100;
+    const bool stale = hasUsableCache &&
+        cachedInfo.lastModified().daysTo(QDateTime::currentDateTime()) >= 7;
+
+    if (!hasUsableCache || stale) {
         QByteArray bytes;
         int status = 0;
-        if (!httpGet(rawDatabaseUrl(info.datPath), &bytes, &status)) {
+        if (httpGet(rawDatabaseUrl(info.datPath), &bytes, &status) && bytes.size() >= 100) {
+            QFile out(localPath);
+            if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                out.write(bytes);
+                out.close();
+                cachedInfo = QFileInfo(localPath);
+            }
+        } else {
             if (networkAvailable)
                 *networkAvailable = false;
-            return false;
+            // A stale database is still much better than blocking/failing the
+            // whole metadata phase when GitHub or the network is unavailable.
+            if (!hasUsableCache)
+                return false;
         }
-        QFile out(localPath);
-        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
-            return false;
-        out.write(bytes);
-        out.close();
     }
-    return parseDatabase(localPath, db);
+
+    return QFileInfo(localPath).exists() && parseDatabase(localPath, db);
 }
 
 static quint32 crc32Update(quint32 crc, const unsigned char *data, int len)
@@ -577,8 +597,12 @@ void LibretroMetadataWorker::run()
     m_stop.storeRelease(0);
     const QVector<RomCatalogRecord> all = RomCatalog::recognizedRecords();
     QVector<RomCatalogRecord> pending;
+    pending.reserve(all.size());
     for (int i = 0; i < all.size(); ++i) {
-        if (!RomCatalog::metadataLookupCurrent(all.at(i).path))
+        // recognizedRecords() already loaded the complete catalog in one pass.
+        // Never reopen rom-catalog.ini or stat every ROM while constructing this
+        // list; that O(N^2) startup path is what left the dialog at 0%.
+        if (!RomCatalog::metadataLookupCurrent(all.at(i)))
             pending.push_back(all.at(i));
     }
 

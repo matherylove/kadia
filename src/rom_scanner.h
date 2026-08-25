@@ -30,9 +30,16 @@ struct RomCatalogRecord
     QString scrapedDescription;
     QString coverArtPath;
     QString metadataSource;
+    QString metadataLookupState;
+    int metadataLookupVersion;
+    qint64 metadataLookupCheckedMs;
     bool automaticDetection;
 
-    RomCatalogRecord() : automaticDetection(false) {}
+    RomCatalogRecord()
+        : metadataLookupVersion(0)
+        , metadataLookupCheckedMs(-1)
+        , automaticDetection(false)
+    {}
 };
 
 namespace RomCatalog
@@ -60,6 +67,7 @@ namespace RomCatalog
                               const QString &description, const QString &coverPath,
                               const QString &source);
     bool metadataLookupCurrent(const QString &path);
+    bool metadataLookupCurrent(const RomCatalogRecord &record);
     void markMetadataLookup(const QString &path, const QString &state);
     bool isAutomaticDetection(const QString &path);
     QStringList systems();

@@ -464,6 +464,22 @@ static QString scanProgressStyleSheet()
 
 namespace RomCatalog {
 
+static void invalidateMetadataLookupInCurrentGroup(QSettings &s, bool clearExternalMetadata)
+{
+    s.remove(QStringLiteral("metadataLookupState"));
+    s.remove(QStringLiteral("metadataLookupVersion"));
+    s.remove(QStringLiteral("metadataFileSize"));
+    s.remove(QStringLiteral("metadataFileMtime"));
+    s.remove(QStringLiteral("metadataLookupCheckedAt"));
+    if (clearExternalMetadata) {
+        s.remove(QStringLiteral("scrapedTitle"));
+        s.remove(QStringLiteral("scrapedDescription"));
+        s.remove(QStringLiteral("coverArtPath"));
+        s.remove(QStringLiteral("metadataSource"));
+        s.remove(QStringLiteral("metadataUpdatedAt"));
+    }
+}
+
 bool isKnown(const QString &path)
 {
     QSettings s(catalogPath(), QSettings::IniFormat);
@@ -483,6 +499,7 @@ void saveClassification(const QString &path, const QString &system)
     s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
     s.setValue(QStringLiteral("classification"), system);
     s.setValue(QStringLiteral("classificationSource"), QStringLiteral("manual"));
+    invalidateMetadataLookupInCurrentGroup(s, false);
     s.endGroup();
     s.sync();
 }
@@ -501,6 +518,7 @@ void saveInspectionMetadata(const QString &path, const QString &detectedSystem,
     s.setValue(QStringLiteral("internalId"), internalIdValue.simplified());
     s.setValue(QStringLiteral("format"), formatValue.simplified());
     s.setValue(QStringLiteral("confidence"), confidence);
+    invalidateMetadataLookupInCurrentGroup(s, true);
     s.endGroup();
     s.sync();
 }
@@ -518,6 +536,7 @@ void saveDetectedRom(const QString &path, const QString &system, const QString &
     s.setValue(QStringLiteral("internalId"), internalIdValue.simplified());
     s.setValue(QStringLiteral("format"), formatValue.simplified());
     s.setValue(QStringLiteral("confidence"), confidence);
+    invalidateMetadataLookupInCurrentGroup(s, true);
     s.endGroup();
     s.sync();
 }
@@ -624,28 +643,32 @@ void saveScreenScraperMetadata(const QString &path, const QString &title,
     saveExternalMetadata(path, title, descriptionValue, coverPath, source);
 }
 
+bool metadataLookupCurrent(const RomCatalogRecord &record)
+{
+    const QString state = record.metadataLookupState.trimmed();
+    if (state.isEmpty() || record.metadataLookupVersion != 1)
+        return false;
+
+    // File changes are invalidated by RomScanner when it actually re-analyzes a
+    // new/modified candidate. Do not stat every ROM again here: doing that before
+    // metadataStarted() was the cause of the apparent "Preparing Libretro metadata"
+    // hang on large libraries and slow/removable drives.
+    if (state.compare(QStringLiteral("notfound"), Qt::CaseInsensitive) == 0) {
+        if (record.metadataLookupCheckedMs < 0)
+            return false;
+        const QDateTime checkedAt = QDateTime::fromMSecsSinceEpoch(record.metadataLookupCheckedMs, Qt::UTC);
+        if (!checkedAt.isValid() || checkedAt.daysTo(QDateTime::currentDateTimeUtc()) >= 30)
+            return false;
+    }
+    return true;
+}
+
 bool metadataLookupCurrent(const QString &path)
 {
-    const QFileInfo fi(path);
-    if (!fi.exists() || !fi.isFile())
-        return true;
-
-    QSettings s(catalogPath(), QSettings::IniFormat);
-    s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
-    const QString state = s.value(QStringLiteral("metadataLookupState")).toString();
-    const int lookupVersion = s.value(QStringLiteral("metadataLookupVersion"), 0).toInt();
-    const qint64 savedSize = s.value(QStringLiteral("metadataFileSize"), qint64(-1)).toLongLong();
-    const qint64 savedMtime = s.value(QStringLiteral("metadataFileMtime"), qint64(-1)).toLongLong();
-    const QDateTime checkedAt = s.value(QStringLiteral("metadataLookupCheckedAt")).toDateTime();
-    s.endGroup();
-    if (state.isEmpty() || lookupVersion != 1)
+    RomCatalogRecord record;
+    if (!recordForPath(path, &record))
         return false;
-    if (savedSize != fi.size() || savedMtime != fi.lastModified().toMSecsSinceEpoch())
-        return false;
-    if (state.compare(QStringLiteral("notfound"), Qt::CaseInsensitive) == 0 &&
-        (!checkedAt.isValid() || checkedAt.daysTo(QDateTime::currentDateTimeUtc()) >= 30))
-        return false;
-    return true;
+    return metadataLookupCurrent(record);
 }
 
 void markMetadataLookup(const QString &path, const QString &state)
@@ -768,6 +791,10 @@ static void readCatalogRecordFromCurrentGroup(QSettings &s, RomCatalogRecord *re
     record->scrapedDescription = s.value(QStringLiteral("scrapedDescription")).toString().simplified();
     record->coverArtPath = QDir::fromNativeSeparators(s.value(QStringLiteral("coverArtPath")).toString());
     record->metadataSource = s.value(QStringLiteral("metadataSource")).toString().simplified();
+    record->metadataLookupState = s.value(QStringLiteral("metadataLookupState")).toString().simplified();
+    record->metadataLookupVersion = s.value(QStringLiteral("metadataLookupVersion"), 0).toInt();
+    const QDateTime metadataCheckedAt = s.value(QStringLiteral("metadataLookupCheckedAt")).toDateTime();
+    record->metadataLookupCheckedMs = metadataCheckedAt.isValid() ? metadataCheckedAt.toUTC().toMSecsSinceEpoch() : -1;
     record->automaticDetection =
         s.value(QStringLiteral("classificationSource")).toString().compare(
             QStringLiteral("automatic"), Qt::CaseInsensitive) == 0;
