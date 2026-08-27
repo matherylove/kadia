@@ -73,19 +73,28 @@ static QImage loadWithGdiPlus(const QString &path)
         return QImage();
 
     QImage result;
-    Gdiplus::Bitmap bitmap(reinterpret_cast<const WCHAR *>(path.utf16()));
-    if (bitmap.GetLastStatus() == Gdiplus::Ok && bitmap.GetWidth() > 0 && bitmap.GetHeight() > 0) {
-        const UINT w = bitmap.GetWidth();
-        const UINT h = bitmap.GetHeight();
-        Gdiplus::Rect rect(0, 0, static_cast<INT>(w), static_cast<INT>(h));
-        Gdiplus::BitmapData data;
-        if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &data) == Gdiplus::Ok) {
-            QImage wrapped(static_cast<uchar *>(data.Scan0), static_cast<int>(w), static_cast<int>(h),
-                           data.Stride, QImage::Format_ARGB32);
-            result = wrapped.copy();
-            bitmap.UnlockBits(&data);
+
+    // Every GDI+ object must be destroyed before GdiplusShutdown().  In the
+    // previous implementation `bitmap` lived until function exit, so its
+    // destructor called GdipDisposeImage() after GDI+ had already been shut
+    // down.  On Windows this is an INVALID_POINTER_READ in GdiPlus.dll during
+    // startup whenever a desktop/custom wallpaper is restored.
+    {
+        Gdiplus::Bitmap bitmap(reinterpret_cast<const WCHAR *>(path.utf16()));
+        if (bitmap.GetLastStatus() == Gdiplus::Ok && bitmap.GetWidth() > 0 && bitmap.GetHeight() > 0) {
+            const UINT w = bitmap.GetWidth();
+            const UINT h = bitmap.GetHeight();
+            Gdiplus::Rect rect(0, 0, static_cast<INT>(w), static_cast<INT>(h));
+            Gdiplus::BitmapData data;
+            if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &data) == Gdiplus::Ok) {
+                QImage wrapped(static_cast<uchar *>(data.Scan0), static_cast<int>(w), static_cast<int>(h),
+                               data.Stride, QImage::Format_ARGB32);
+                result = wrapped.copy();
+                bitmap.UnlockBits(&data);
+            }
         }
     }
+
     Gdiplus::GdiplusShutdown(token);
     return result;
 }
