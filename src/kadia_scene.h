@@ -81,7 +81,8 @@ private:
     Star makeStar(bool randomDepth);
     void updateStars(double dtSeconds);
 
-    void drawFrame(QPainter &p);
+    void drawBackdrop(QPainter &p);
+    void drawForeground(QPainter &p);
     void drawVistaBackground(QPainter &p);
     void drawStarfield(QPainter &p);
     void drawVignette(QPainter &p);
@@ -128,6 +129,7 @@ private:
     QImage m_logo;
     QImage m_logoWhite;
     QImage m_backgroundImage;
+    QImage m_backdropBuffer;
     qreal m_backgroundOpacity;
     Command m_pendingCommand;
     QVector<Star> m_stars;

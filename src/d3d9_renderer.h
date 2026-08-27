@@ -12,9 +12,10 @@
 #endif
 
 // Direct3D 9 presenter derived from the proven D3D9 path in the supplied
-// Sightline project. Kadia renders into a BGRA QImage (native or an adaptive
-// lower internal resolution), copies it into an X8R8G8B8 offscreen surface,
-// and lets D3D9 scale/present it to the native Qt HWND at monitor VSync.
+// Sightline project. Kadia renders the UI into a native-resolution BGRA QImage,
+// copies it into an X8R8G8B8 offscreen surface, and presents it pixel-sharp to
+// the native Qt HWND at monitor VSync. Only background capture may be sampled
+// below native resolution; text and UI geometry are never globally upscaled.
 class D3D9Renderer
 {
 public:

@@ -43,6 +43,8 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     , m_romScanCancelled(false)
     , m_postStartupChecksCompleted(false)
     , m_liveDesktopBackground(false)
+    , m_activeEmulatorPid(0)
+    , m_fullscreenEnforceAttempts(0)
 {
     setWindowTitle(QStringLiteral("Mathery Kadia!"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -68,11 +70,21 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     m_timer.setInterval(0);
     m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, SIGNAL(timeout()), this, SLOT(frameTick()));
+
+    // Some emulator builds ignore their fullscreen CLI option or create a new
+    // game window after their launcher window. For a short period after launch,
+    // make the largest emulator-owned window borderless on its monitor. This is
+    // deliberately separate from the render timer, which is stopped while the
+    // game owns the display.
+    m_emulatorFullscreenTimer.setInterval(200);
+    m_emulatorFullscreenTimer.setTimerType(Qt::CoarseTimer);
+    connect(&m_emulatorFullscreenTimer, SIGNAL(timeout()), this, SLOT(enforceExternalFullscreen()));
 }
 
 KadiaWindow::~KadiaWindow()
 {
     m_timer.stop();
+    m_emulatorFullscreenTimer.stop();
     DesktopCapture::setCaptureExclusion(winId(), false);
     if (m_romScanner) {
         m_romScanner->requestStop();
@@ -138,8 +150,10 @@ void KadiaWindow::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     ensureRenderer();
-    DesktopCapture::setCaptureExclusion(winId(), m_liveDesktopBackground);
+    // Wallpaper-only capture never excludes Kadia from OBS/screen capture.
+    DesktopCapture::setCaptureExclusion(winId(), false);
     m_clock.start();
+    m_desktopCaptureClock.start();
     if (!m_timer.isActive())
         m_timer.start();
 }
@@ -279,6 +293,7 @@ void KadiaWindow::closeEvent(QCloseEvent *event)
 {
     m_closing = true;
     m_timer.stop();
+    m_emulatorFullscreenTimer.stop();
     GameStats::flush();
     m_renderer.shutdown();
     QWidget::closeEvent(event);
@@ -305,21 +320,50 @@ void KadiaWindow::changeEvent(QEvent *event)
     }
 
     if (!m_activeGamePath.isEmpty() && m_activeGameStarted.isValid()) {
-        const QString finishedPath = m_activeGamePath;
-        const qint64 seconds = m_activeGameStarted.secsTo(QDateTime::currentDateTimeUtc());
-        if (seconds >= 5)
-            GameStats::addPlayTime(finishedPath, seconds);
-        m_activeGamePath.clear();
-        m_activeGameStarted = QDateTime();
-        // Updating one record is enough. Rebuilding/sorting every catalog item
-        // here caused a visible stall whenever the emulator returned focus.
-        updateKadiaGameFromPath(finishedPath);
+        // Regaining Kadia focus does not necessarily mean the game closed; the
+        // user may have Alt-Tabbed, or an emulator may briefly switch windows
+        // during boot. Only close the play session when the launched process
+        // tree is actually gone. This also keeps the fullscreen watcher alive
+        // through slow launcher -> renderer transitions.
+        const bool emulatorStillRunning = m_activeEmulatorPid > 0 &&
+                                           EmulatorManager::isProcessTreeRunning(m_activeEmulatorPid);
+        if (!emulatorStillRunning) {
+            const QString finishedPath = m_activeGamePath;
+            const qint64 seconds = m_activeGameStarted.secsTo(QDateTime::currentDateTimeUtc());
+            if (seconds >= 5)
+                GameStats::addPlayTime(finishedPath, seconds);
+            m_activeGamePath.clear();
+            m_activeGameStarted = QDateTime();
+            m_activeEmulatorPid = 0;
+            m_emulatorFullscreenTimer.stop();
+            // Updating one record is enough. Rebuilding/sorting every catalog
+            // item here caused a visible stall whenever the emulator returned.
+            updateKadiaGameFromPath(finishedPath);
+        }
     }
 
     ensureRenderer();
     m_clock.restart();
     if (!m_timer.isActive())
         m_timer.start();
+}
+
+void KadiaWindow::enforceExternalFullscreen()
+{
+    if (m_closing || m_activeEmulatorPid <= 0) {
+        m_emulatorFullscreenTimer.stop();
+        return;
+    }
+
+    EmulatorManager::enforceFullscreen(m_activeEmulatorPid);
+    ++m_fullscreenEnforceAttempts;
+
+    // Twelve seconds covers slow emulator startup/shader-cache transitions and
+    // launchers that replace their first window with a game window. The Win32
+    // adjustment uses SWP_NOACTIVATE, so this pass never steals focus if the
+    // user intentionally switches elsewhere.
+    if (m_fullscreenEnforceAttempts >= 60)
+        m_emulatorFullscreenTimer.stop();
 }
 
 void KadiaWindow::resumeRenderingAfterExternalLaunch()
@@ -387,11 +431,28 @@ void KadiaWindow::frameTick()
 
     const QSize renderSize = renderSurfaceSize();
     if (m_liveDesktopBackground) {
-        const QPoint globalTopLeft = mapToGlobal(QPoint(0, 0));
-        const QRect desktopRegion(globalTopLeft, size());
-        const QImage desktopFrame = DesktopCapture::capture(desktopRegion, renderSize);
-        if (!desktopFrame.isNull())
-            m_scene.setBackgroundImage(desktopFrame);
+        // Wallpaper capture is independent from UI presentation rate. Most
+        // animated wallpaper sources are 60 fps or lower; sampling them more
+        // often only burns GDI bandwidth and steals time from the native-res UI.
+        const int captureHz = qMin(60, qMax(1, m_renderer.refreshRate()));
+        const qint64 captureIntervalNs = 1000000000LL / captureHz;
+        if (!m_desktopCaptureClock.isValid() || m_desktopCaptureClock.nsecsElapsed() >= captureIntervalNs) {
+            const QPoint globalTopLeft = mapToGlobal(QPoint(0, 0));
+            const QRect desktopRegion(globalTopLeft, size());
+
+            // The wallpaper is a background layer, so cap only its capture
+            // resolution. The interface itself remains pixel-for-pixel native.
+            QSize backgroundSize = size();
+            const QSize backgroundBudget(1920, 1080);
+            if (backgroundSize.width() > backgroundBudget.width() ||
+                backgroundSize.height() > backgroundBudget.height())
+                backgroundSize.scale(backgroundBudget, Qt::KeepAspectRatio);
+
+            const QImage desktopFrame = DesktopCapture::capture(desktopRegion, backgroundSize);
+            if (!desktopFrame.isNull())
+                m_scene.setBackgroundImage(desktopFrame);
+            m_desktopCaptureClock.restart();
+        }
     }
 
     m_scene.render(m_frame, renderSize);
@@ -401,30 +462,12 @@ void KadiaWindow::frameTick()
 
 QSize KadiaWindow::renderSurfaceSize() const
 {
-    const QSize nativeSize(qMax(1, width()), qMax(1, height()));
-    const qint64 nativePixels = static_cast<qint64>(nativeSize.width()) * nativeSize.height();
-    const int hz = m_renderer.isReady() ? m_renderer.refreshRate() : 60;
-
-    // QPainter is the expensive part of Kadia's frame. Keep native layout and
-    // hit testing but cap the software-rasterized pixel count more aggressively
-    // as refresh rate rises. D3D9 then performs the inexpensive final upscale.
-    qint64 pixelBudget = 2200000;       // ~1080p at 60/75 Hz
-    if (hz >= 165) pixelBudget = 900000;
-    else if (hz >= 144) pixelBudget = 1050000;
-    else if (hz >= 120) pixelBudget = 1250000;
-    else if (hz >= 90) pixelBudget = 1550000;
-
-    if (nativePixels <= pixelBudget)
-        return nativeSize;
-
-    const qreal scale = qSqrt(static_cast<qreal>(pixelBudget) / static_cast<qreal>(nativePixels));
-    int w = qMax(640, static_cast<int>(nativeSize.width() * scale));
-    int h = qMax(360, static_cast<int>(nativeSize.height() * scale));
-    // Even dimensions behave better on old D3D9 drivers and avoid half-pixel
-    // sampling asymmetry during StretchRect.
-    w &= ~1;
-    h &= ~1;
-    return QSize(qMax(2, w), qMax(2, h));
+    // Never downscale the complete UI. The previous adaptive software-raster
+    // budget made text, thin lines and console artwork visibly soft at high
+    // refresh rates because D3D9 had to enlarge the entire composed frame.
+    // Performance work now targets expensive subsystems (wallpaper sampling,
+    // async artwork, cached data) while Kadia stays pixel-sharp at native size.
+    return QSize(qMax(1, width()), qMax(1, height()));
 }
 
 void KadiaWindow::runPostStartupChecks()
@@ -611,7 +654,8 @@ void KadiaWindow::processSceneCommands()
         if (dialog.exec() == QDialog::Accepted) {
             const BackgroundPreferences preferences = dialog.preferences();
             m_liveDesktopBackground = preferences.mode == BackgroundPreferences::DesktopWallpaper && preferences.opacity > 0;
-            DesktopCapture::setCaptureExclusion(winId(), m_liveDesktopBackground);
+            DesktopCapture::setCaptureExclusion(winId(), false);
+            m_desktopCaptureClock.restart();
             BackgroundSettings::applyToScene(&m_scene, preferences);
         }
         return;
@@ -624,7 +668,8 @@ void KadiaWindow::processSceneCommands()
             refreshKadiaGameLibrary();
             const BackgroundPreferences preferences = BackgroundSettings::load();
             m_liveDesktopBackground = preferences.mode == BackgroundPreferences::DesktopWallpaper && preferences.opacity > 0;
-            DesktopCapture::setCaptureExclusion(winId(), m_liveDesktopBackground);
+            DesktopCapture::setCaptureExclusion(winId(), false);
+            m_desktopCaptureClock.restart();
             BackgroundSettings::applyToScene(&m_scene, preferences);
         }
         return;
@@ -632,9 +677,18 @@ void KadiaWindow::processSceneCommands()
 
     if (command == KadiaScene::LaunchSelectedGame) {
         const QString path = m_scene.selectedGamePath();
-        if (EmulatorManager::launch(m_scene.selectedGameSystem(), path, this)) {
+        qint64 launchedPid = 0;
+        if (EmulatorManager::launch(m_scene.selectedGameSystem(), path, this, &launchedPid)) {
             m_activeGamePath = path;
             m_activeGameStarted = QDateTime::currentDateTimeUtc();
+            m_activeEmulatorPid = launchedPid;
+            m_fullscreenEnforceAttempts = 0;
+            if (m_activeEmulatorPid > 0) {
+                // Run once quickly, then keep watching briefly for emulators
+                // that replace their launcher window with a renderer window.
+                QTimer::singleShot(120, this, SLOT(enforceExternalFullscreen()));
+                m_emulatorFullscreenTimer.start();
+            }
             updateKadiaGameFromPath(path);
 
             // Give the emulator exclusive ownership of the display transition.

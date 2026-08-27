@@ -15,47 +15,16 @@ namespace {
 
 static HWND g_cachedWallpaperWindow = 0;
 static DWORD g_lastWallpaperProbe = 0;
-static bool g_captureExclusionEnabled = false;
 
-static bool supportsTransparentCaptureExclusion()
+static qint64 intersectionArea(const RECT &a, const RECT &b)
 {
-    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    if (!ntdll)
-        return false;
-    typedef LONG (WINAPI *RtlGetVersionFn)(OSVERSIONINFOW *);
-    RtlGetVersionFn rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(
-        GetProcAddress(ntdll, "RtlGetVersion"));
-    if (!rtlGetVersion)
-        return false;
-
-    OSVERSIONINFOW version;
-    ZeroMemory(&version, sizeof(version));
-    version.dwOSVersionInfoSize = sizeof(version);
-    if (rtlGetVersion(&version) != 0)
-        return false;
-    return version.dwMajorVersion > 10 ||
-           (version.dwMajorVersion == 10 && version.dwBuildNumber >= 19041);
-}
-
-static bool setWindowCaptureExclusion(HWND hwnd, bool enabled)
-{
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (!user32 || !hwnd)
-        return false;
-    typedef BOOL (WINAPI *SetWindowDisplayAffinityFn)(HWND, DWORD);
-    SetWindowDisplayAffinityFn fn = reinterpret_cast<SetWindowDisplayAffinityFn>(
-        GetProcAddress(user32, "SetWindowDisplayAffinity"));
-    if (!fn)
-        return false;
-
-    if (enabled && !supportsTransparentCaptureExclusion())
-        return false;
-
-    const DWORD affinity = enabled ? 0x00000011u : 0x00000000u;
-    const bool ok = fn(hwnd, affinity) != FALSE;
-    if (ok)
-        g_captureExclusionEnabled = enabled;
-    return ok;
+    const LONG left = qMax(a.left, b.left);
+    const LONG top = qMax(a.top, b.top);
+    const LONG right = qMin(a.right, b.right);
+    const LONG bottom = qMin(a.bottom, b.bottom);
+    if (right <= left || bottom <= top)
+        return 0;
+    return static_cast<qint64>(right - left) * static_cast<qint64>(bottom - top);
 }
 
 static bool processNameIsWallpaperEngine(const wchar_t *name)
@@ -96,21 +65,20 @@ struct WindowSearch
     WindowSearch() : best(0), bestArea(0) { ZeroMemory(&target, sizeof(target)); }
 };
 
-static qint64 intersectionArea(const RECT &a, const RECT &b)
+static bool isDesktopUiClass(HWND hwnd)
 {
-    const LONG left = qMax(a.left, b.left);
-    const LONG top = qMax(a.top, b.top);
-    const LONG right = qMin(a.right, b.right);
-    const LONG bottom = qMin(a.bottom, b.bottom);
-    if (right <= left || bottom <= top)
-        return 0;
-    return static_cast<qint64>(right - left) * static_cast<qint64>(bottom - top);
+    wchar_t className[128] = {0};
+    GetClassNameW(hwnd, className, 127);
+    return _wcsicmp(className, L"SHELLDLL_DefView") == 0 ||
+           _wcsicmp(className, L"SysListView32") == 0 ||
+           _wcsicmp(className, L"Shell_TrayWnd") == 0 ||
+           _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0;
 }
 
 static BOOL CALLBACK wallpaperWindowCandidate(HWND hwnd, LPARAM param)
 {
     WindowSearch *search = reinterpret_cast<WindowSearch *>(param);
-    if (!search || !IsWindow(hwnd))
+    if (!search || !IsWindow(hwnd) || isDesktopUiClass(hwnd))
         return TRUE;
 
     DWORD pid = 0;
@@ -152,23 +120,54 @@ static HWND findWallpaperEngineWindow(const QRect &screenRect)
     return search.best;
 }
 
-struct ShellWindowSearch
+struct DefViewSearch
+{
+    HWND host;
+    DefViewSearch() : host(0) {}
+};
+
+static BOOL CALLBACK findDefViewHostCallback(HWND hwnd, LPARAM param)
+{
+    DefViewSearch *search = reinterpret_cast<DefViewSearch *>(param);
+    if (!search)
+        return TRUE;
+    if (FindWindowExW(hwnd, 0, L"SHELLDLL_DefView", 0)) {
+        search->host = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HWND findWallpaperWorker()
+{
+    // Explorer normally keeps SHELLDLL_DefView (desktop icons) in Progman or
+    // one WorkerW.  The WorkerW immediately behind that host is the wallpaper
+    // layer.  Selecting this layer is crucial: screen capture or the DefView
+    // host would also include icons, taskbars and ordinary application windows.
+    DefViewSearch search;
+    EnumWindows(findDefViewHostCallback, reinterpret_cast<LPARAM>(&search));
+    if (search.host) {
+        HWND worker = FindWindowExW(0, search.host, L"WorkerW", 0);
+        if (worker)
+            return worker;
+    }
+
+    HWND progman = FindWindowW(L"Progman", 0);
+    return progman;
+}
+
+struct ChildLayerSearch
 {
     RECT target;
     HWND best;
     qint64 bestArea;
-    ShellWindowSearch() : best(0), bestArea(0) { ZeroMemory(&target, sizeof(target)); }
+    ChildLayerSearch() : best(0), bestArea(0) { ZeroMemory(&target, sizeof(target)); }
 };
 
-static BOOL CALLBACK shellWallpaperCandidate(HWND hwnd, LPARAM param)
+static BOOL CALLBACK childWallpaperCandidate(HWND hwnd, LPARAM param)
 {
-    ShellWindowSearch *search = reinterpret_cast<ShellWindowSearch *>(param);
-    if (!search || !IsWindow(hwnd))
-        return TRUE;
-
-    wchar_t className[128] = {0};
-    GetClassNameW(hwnd, className, 127);
-    if (_wcsicmp(className, L"WorkerW") != 0 && _wcsicmp(className, L"Progman") != 0)
+    ChildLayerSearch *search = reinterpret_cast<ChildLayerSearch *>(param);
+    if (!search || !IsWindow(hwnd) || isDesktopUiClass(hwnd))
         return TRUE;
 
     RECT rect;
@@ -182,102 +181,63 @@ static BOOL CALLBACK shellWallpaperCandidate(HWND hwnd, LPARAM param)
     return TRUE;
 }
 
-static HWND findShellWallpaperWindow(const QRect &screenRect)
+static HWND findGenericWallpaperChild(const QRect &screenRect)
 {
-    ShellWindowSearch search;
+    HWND worker = findWallpaperWorker();
+    if (!worker)
+        return 0;
+
+    ChildLayerSearch search;
     search.target.left = screenRect.left();
     search.target.top = screenRect.top();
     search.target.right = screenRect.right() + 1;
     search.target.bottom = screenRect.bottom() + 1;
-
-    HWND progman = FindWindowW(L"Progman", 0);
-    if (progman)
-        shellWallpaperCandidate(progman, reinterpret_cast<LPARAM>(&search));
-    EnumWindows(shellWallpaperCandidate, reinterpret_cast<LPARAM>(&search));
+    EnumChildWindows(worker, childWallpaperCandidate, reinterpret_cast<LPARAM>(&search));
     return search.best;
+}
+
+static bool cachedWindowCovers(const QRect &screenRect)
+{
+    if (!g_cachedWallpaperWindow || !IsWindow(g_cachedWallpaperWindow))
+        return false;
+    RECT rect;
+    if (!GetWindowRect(g_cachedWallpaperWindow, &rect))
+        return false;
+    RECT target = { screenRect.left(), screenRect.top(),
+                    screenRect.right() + 1, screenRect.bottom() + 1 };
+    return intersectionArea(rect, target) > 0;
 }
 
 static HWND wallpaperWindowForRect(const QRect &screenRect)
 {
-    bool cachedUsable = false;
-    if (g_cachedWallpaperWindow && IsWindow(g_cachedWallpaperWindow)) {
-        RECT rect;
-        if (GetWindowRect(g_cachedWallpaperWindow, &rect)) {
-            RECT target = { screenRect.left(), screenRect.top(),
-                            screenRect.right() + 1, screenRect.bottom() + 1 };
-            cachedUsable = intersectionArea(rect, target) > 0;
-        }
-    }
-
-    // Re-probe occasionally even while the shell fallback is valid so a
-    // Wallpaper Engine instance started after Kadia is picked up live. Doing
-    // the Toolhelp process walk every frame would defeat the performance goal.
+    const bool cachedUsable = cachedWindowCovers(screenRect);
     const DWORD now = GetTickCount();
-    if (!cachedUsable || static_cast<DWORD>(now - g_lastWallpaperProbe) >= 2000u) {
+
+    // Re-probe occasionally so starting/stopping Wallpaper Engine while Kadia
+    // is open is reflected without walking the process list every frame.
+    if (!cachedUsable || static_cast<DWORD>(now - g_lastWallpaperProbe) >= 1500u) {
         g_lastWallpaperProbe = now;
+
+        // Prefer Wallpaper Engine's renderer itself. This is the animated
+        // surface behind Explorer's icon layer, not a screenshot of the
+        // composited desktop.
         HWND animated = findWallpaperEngineWindow(screenRect);
         if (animated) {
             g_cachedWallpaperWindow = animated;
             return g_cachedWallpaperWindow;
         }
-        if (!cachedUsable)
-            g_cachedWallpaperWindow = findShellWallpaperWindow(screenRect);
+
+        // Other wallpaper applications commonly parent their renderer to the
+        // wallpaper WorkerW. Capture the largest child of that worker only.
+        HWND generic = findGenericWallpaperChild(screenRect);
+        if (generic) {
+            g_cachedWallpaperWindow = generic;
+            return g_cachedWallpaperWindow;
+        }
+
+        g_cachedWallpaperWindow = 0;
     }
     return g_cachedWallpaperWindow;
-}
-
-static QImage captureScreenRegion(const QRect &screenRect, const QSize &outputSize)
-{
-    if (screenRect.isEmpty() || outputSize.isEmpty())
-        return QImage();
-
-    HDC sourceDc = GetDC(0);
-    if (!sourceDc)
-        return QImage();
-    HDC memoryDc = CreateCompatibleDC(sourceDc);
-    if (!memoryDc) {
-        ReleaseDC(0, sourceDc);
-        return QImage();
-    }
-
-    BITMAPINFO bmi;
-    ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = outputSize.width();
-    bmi.bmiHeader.biHeight = -outputSize.height();
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void *bits = 0;
-    HBITMAP bitmap = CreateDIBSection(memoryDc, &bmi, DIB_RGB_COLORS, &bits, 0, 0);
-    if (!bitmap || !bits) {
-        if (bitmap) DeleteObject(bitmap);
-        DeleteDC(memoryDc);
-        ReleaseDC(0, sourceDc);
-        return QImage();
-    }
-
-    HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
-    SetStretchBltMode(memoryDc, HALFTONE);
-    SetBrushOrgEx(memoryDc, 0, 0, 0);
-    const BOOL ok = StretchBlt(memoryDc,
-                               0, 0, outputSize.width(), outputSize.height(),
-                               sourceDc, screenRect.left(), screenRect.top(),
-                               screenRect.width(), screenRect.height(), SRCCOPY | CAPTUREBLT);
-
-    QImage result;
-    if (ok) {
-        QImage wrapped(static_cast<uchar *>(bits), outputSize.width(), outputSize.height(),
-                       outputSize.width() * 4, QImage::Format_RGB32);
-        result = wrapped.copy();
-    }
-
-    SelectObject(memoryDc, oldBitmap);
-    DeleteObject(bitmap);
-    DeleteDC(memoryDc);
-    ReleaseDC(0, sourceDc);
-    return result;
 }
 
 static QImage captureWindowRegion(HWND hwnd, const QRect &screenRect, const QSize &outputSize)
@@ -341,7 +301,7 @@ static QImage captureWindowRegion(HWND hwnd, const QRect &screenRect, const QSiz
     return result;
 }
 
-}
+} // namespace
 #endif
 
 namespace DesktopCapture {
@@ -349,7 +309,23 @@ namespace DesktopCapture {
 bool setCaptureExclusion(WId windowId, bool enabled)
 {
 #ifdef Q_OS_WIN
-    return setWindowCaptureExclusion(reinterpret_cast<HWND>(windowId), enabled);
+    Q_UNUSED(enabled);
+
+    // The old implementation excluded Kadia from screen capture and then
+    // captured the *composited screen*. That necessarily included windows,
+    // desktop icons and the taskbar. The wallpaper-only implementation never
+    // captures the screen, so explicitly clear any affinity that an older run
+    // may have left on this HWND and keep Kadia visible to OBS/capture tools.
+    HWND hwnd = reinterpret_cast<HWND>(windowId);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32 || !hwnd)
+        return false;
+    typedef BOOL (WINAPI *SetWindowDisplayAffinityFn)(HWND, DWORD);
+    SetWindowDisplayAffinityFn fn = reinterpret_cast<SetWindowDisplayAffinityFn>(
+        GetProcAddress(user32, "SetWindowDisplayAffinity"));
+    if (!fn)
+        return false;
+    return fn(hwnd, 0x00000000u) != FALSE; // WDA_NONE
 #else
     Q_UNUSED(windowId);
     Q_UNUSED(enabled);
@@ -360,18 +336,10 @@ bool setCaptureExclusion(WId windowId, bool enabled)
 QImage capture(const QRect &screenRect, const QSize &outputSize)
 {
 #ifdef Q_OS_WIN
-    // This is the most literal transparency mode: capture the composited
-    // desktop directly while Kadia is excluded from capture. It preserves
-    // Wallpaper Engine, desktop icons and any animation exactly as Windows is
-    // displaying them.
-    if (g_captureExclusionEnabled) {
-        const QImage screen = captureScreenRegion(screenRect, outputSize);
-        if (!screen.isNull())
-            return screen;
-    }
-
-    // XP / older Windows fallback: capture the wallpaper host itself so Kadia
-    // never recursively records its own window.
+    // Capture only the wallpaper renderer. Never call GetDC(NULL) / BitBlt on
+    // the desktop here: that is the composited desktop and includes icons,
+    // taskbars and ordinary windows, which is explicitly not the requested
+    // transparency effect.
     HWND source = wallpaperWindowForRect(screenRect);
     if (!source)
         return QImage();
@@ -383,4 +351,4 @@ QImage capture(const QRect &screenRect, const QSize &outputSize)
 #endif
 }
 
-}
+} // namespace DesktopCapture

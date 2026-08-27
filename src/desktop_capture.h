@@ -7,15 +7,14 @@
 
 namespace DesktopCapture
 {
-    // On Windows 10 2004+ this excludes Kadia itself from public screen
-    // capture APIs, allowing a true live capture of whatever is behind it.
-    // Older Windows versions return false and use the wallpaper-window fallback.
+    // Kept for source/settings compatibility. Wallpaper-only capture no longer
+    // excludes Kadia from screen capture; this function simply clears any
+    // legacy display-affinity flag on Windows.
     bool setCaptureExclusion(WId windowId, bool enabled);
 
-    // Captures the desktop wallpaper surface underneath Kadia. On Windows this
-    // prefers Wallpaper Engine's own render window when it is present, then
-    // falls back to the shell wallpaper host. The returned image is already
-    // scaled to outputSize so the main render loop never has to copy a native
-    // 1440p/4K desktop frame just to downsample it afterwards.
+    // Captures only the wallpaper renderer underneath Explorer's icon layer.
+    // Wallpaper Engine is detected directly; other animated wallpaper hosts
+    // parented to WorkerW are used as a generic fallback. Ordinary windows,
+    // desktop icons and taskbars are never part of this capture path.
     QImage capture(const QRect &screenRect, const QSize &outputSize);
 }

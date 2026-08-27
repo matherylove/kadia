@@ -343,7 +343,13 @@ bool D3D9Renderer::blitToScreen(int width, int height)
         target.top = (m_clientSize.height() - drawHeight) / 2;
         target.bottom = target.top + drawHeight;
     }
-    hr = m_device->StretchRect(m_surface, &source, backBuffer, &target, D3DTEXF_LINEAR);
+    const bool oneToOne = width == (target.right - target.left) &&
+                          height == (target.bottom - target.top);
+    // Never filter a native-resolution UI frame. Linear filtering was useful
+    // only for the now-removed adaptive downscale path and softened text and
+    // one-pixel strokes even when the final geometry was effectively 1:1.
+    hr = m_device->StretchRect(m_surface, &source, backBuffer, &target,
+                               oneToOne ? D3DTEXF_NONE : D3DTEXF_LINEAR);
     backBuffer->Release();
     if (FAILED(hr)) {
         setError(hrString("IDirect3DDevice9::StretchRect", hr));

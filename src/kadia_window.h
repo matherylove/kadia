@@ -49,6 +49,7 @@ protected:
 private slots:
     void frameTick();
     void resumeRenderingAfterExternalLaunch();
+    void enforceExternalFullscreen();
     void onRomDiscovered(const QString &path, const QString &hint,
                          const QString &internalTitle, const QString &format);
     void onRomRecognized(const QString &path, const QString &system, const QString &title);
@@ -69,7 +70,9 @@ private:
     KadiaScene m_scene;
     QImage m_frame;
     QTimer m_timer;
+    QTimer m_emulatorFullscreenTimer;
     QElapsedTimer m_clock;
+    QElapsedTimer m_desktopCaptureClock;
     bool m_rendererAttempted;
     bool m_closing;
     bool m_monitorMode;
@@ -90,6 +93,8 @@ private:
     bool m_romScanCancelled;
     bool m_postStartupChecksCompleted;
     bool m_liveDesktopBackground;
+    qint64 m_activeEmulatorPid;
+    int m_fullscreenEnforceAttempts;
     QString m_activeGamePath;
     QDateTime m_activeGameStarted;
 };

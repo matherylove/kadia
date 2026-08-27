@@ -388,20 +388,44 @@ void KadiaScene::render(QImage &target, const QSize &renderSize)
     if (target.size() != targetSize || target.format() != QImage::Format_ARGB32_Premultiplied)
         target = QImage(targetSize, QImage::Format_ARGB32_Premultiplied);
 
+    // Keep all interactive UI, text, covers and one-pixel decoration at the
+    // native render size. Only the decorative moving backdrop is rasterized at
+    // a capped resolution on large monitors. This preserves the performance
+    // benefit of a smaller software QPainter workload without ever upscaling
+    // the interface itself (the source of the blurry previous build).
+    QSize backdropSize = targetSize;
+    const QSize backdropCap(1920, 1080);
+    if (backdropSize.width() > backdropCap.width() || backdropSize.height() > backdropCap.height())
+        backdropSize.scale(backdropCap, Qt::KeepAspectRatio);
+    backdropSize.setWidth(qMax(320, backdropSize.width()));
+    backdropSize.setHeight(qMax(180, backdropSize.height()));
+
+    if (m_backdropBuffer.size() != backdropSize ||
+        m_backdropBuffer.format() != QImage::Format_ARGB32_Premultiplied)
+        m_backdropBuffer = QImage(backdropSize, QImage::Format_ARGB32_Premultiplied);
+    m_backdropBuffer.fill(QColor(0, 0, 0));
+
+    {
+        QPainter backgroundPainter(&m_backdropBuffer);
+        backgroundPainter.setRenderHint(QPainter::Antialiasing, true);
+        backgroundPainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        const qreal bx = static_cast<qreal>(backdropSize.width()) / qMax(1, viewport.width());
+        const qreal by = static_cast<qreal>(backdropSize.height()) / qMax(1, viewport.height());
+        backgroundPainter.scale(bx, by);
+        drawBackdrop(backgroundPainter);
+    }
+
     target.fill(QColor(0, 0, 0));
     QPainter p(&target);
     p.setRenderHint(QPainter::Antialiasing, true);
     p.setRenderHint(QPainter::TextAntialiasing, true);
     p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    p.drawImage(QRectF(0.0, 0.0, targetSize.width(), targetSize.height()), m_backdropBuffer);
 
-    // Layout and hit-testing remain in native client coordinates. Only the
-    // raster workload is reduced; Direct3D scales this internal canvas back
-    // to the monitor with linear filtering. This is the critical path for
-    // sustaining 120/144/165 Hz on large desktop resolutions.
     const qreal sx = static_cast<qreal>(targetSize.width()) / qMax(1, viewport.width());
     const qreal sy = static_cast<qreal>(targetSize.height()) / qMax(1, viewport.height());
     p.scale(sx, sy);
-    drawFrame(p);
+    drawForeground(p);
 }
 
 void KadiaScene::handle(Action action)
@@ -824,7 +848,7 @@ void KadiaScene::updateStars(double dtSeconds)
     }
 }
 
-void KadiaScene::drawFrame(QPainter &p)
+void KadiaScene::drawBackdrop(QPainter &p)
 {
     QPainterPath framePath;
     framePath.addRoundedRect(frameRect(), 16.0, 16.0);
@@ -859,6 +883,16 @@ void KadiaScene::drawFrame(QPainter &p)
     drawVistaBackground(p);
     drawStarfield(p);
     drawVignette(p);
+    p.restore();
+}
+
+void KadiaScene::drawForeground(QPainter &p)
+{
+    QPainterPath framePath;
+    framePath.addRoundedRect(frameRect(), 16.0, 16.0);
+
+    p.save();
+    p.setClipPath(framePath);
     drawTopBar(p);
     if (m_library)
         drawLibrary(p);
