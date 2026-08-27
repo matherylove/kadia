@@ -18,6 +18,7 @@
 #include <QProcess>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QFileInfo>
 #include <QDir>
 #include <QMouseEvent>
@@ -38,6 +39,7 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     , m_metadataDialog(0)
     , m_romDialogActive(false)
     , m_romScanCancelled(false)
+    , m_postStartupChecksCompleted(false)
 {
     setWindowTitle(QStringLiteral("Mathery Kadia!"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -270,6 +272,7 @@ void KadiaWindow::closeEvent(QCloseEvent *event)
 {
     m_closing = true;
     m_timer.stop();
+    GameStats::flush();
     m_renderer.shutdown();
     QWidget::closeEvent(event);
 }
@@ -277,21 +280,68 @@ void KadiaWindow::closeEvent(QCloseEvent *event)
 void KadiaWindow::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
-    if (event->type() == QEvent::ActivationChange && isActiveWindow() &&
-        !m_activeGamePath.isEmpty() && m_activeGameStarted.isValid()) {
+    if (event->type() != QEvent::ActivationChange)
+        return;
+
+    // A fullscreen emulator can change display mode and invalidate a D3D9
+    // device. Do not keep presenting Kadia behind the game: release D3D as
+    // soon as the frontend loses focus and recreate it only when Kadia is
+    // activated again. This also removes the zero-timer CPU load while a game
+    // is running.
+    if (!isActiveWindow()) {
+        if (!m_activeGamePath.isEmpty()) {
+            m_timer.stop();
+            m_renderer.shutdown();
+            m_rendererAttempted = false;
+        }
+        return;
+    }
+
+    if (!m_activeGamePath.isEmpty() && m_activeGameStarted.isValid()) {
+        const QString finishedPath = m_activeGamePath;
         const qint64 seconds = m_activeGameStarted.secsTo(QDateTime::currentDateTimeUtc());
         if (seconds >= 5)
-            GameStats::addPlayTime(m_activeGamePath, seconds);
+            GameStats::addPlayTime(finishedPath, seconds);
         m_activeGamePath.clear();
         m_activeGameStarted = QDateTime();
-        refreshKadiaGameLibrary();
+        // Updating one record is enough. Rebuilding/sorting every catalog item
+        // here caused a visible stall whenever the emulator returned focus.
+        updateKadiaGameFromPath(finishedPath);
     }
+
+    ensureRenderer();
+    m_clock.restart();
+    if (!m_timer.isActive())
+        m_timer.start();
+}
+
+void KadiaWindow::resumeRenderingAfterExternalLaunch()
+{
+    if (m_closing || m_timer.isActive())
+        return;
+
+    // If the emulator owns the foreground, remain completely dormant. The
+    // ActivationChange handler recreates D3D when Kadia becomes active again.
+    if (!m_activeGamePath.isEmpty() && !isActiveWindow())
+        return;
+
+    ensureRenderer();
+    m_clock.restart();
+    if (!m_timer.isActive())
+        m_timer.start();
 }
 
 void KadiaWindow::frameTick()
 {
     if (m_closing)
         return;
+
+    if (!m_activeGamePath.isEmpty() && !isActiveWindow()) {
+        m_timer.stop();
+        m_renderer.shutdown();
+        m_rendererAttempted = false;
+        return;
+    }
 
     ensureRenderer();
     if (!m_renderer.isReady())
@@ -317,6 +367,12 @@ void KadiaWindow::frameTick()
         dispatch(action);
     if (!scannerDialogVisible && !metadataDialogVisible && !m_romDialogActive)
         processSceneCommands();
+
+    // LaunchSelectedGame deliberately tears down D3D inside the command
+    // handler. Do not continue this same frame with a stale device pointer.
+    if (!m_renderer.isReady())
+        return;
+
     m_scene.setControllerConnected(m_input.controllerConnected());
 
     m_scene.setViewportSize(size());
@@ -331,7 +387,16 @@ void KadiaWindow::runPostStartupChecks()
     if (m_closing)
         return;
 
+    const bool automaticStartupPass = !m_postStartupChecksCompleted;
+    m_postStartupChecksCompleted = true;
+
     WinDSProBootstrap::offerOnce(this);
+
+    // Once a catalog exists, startup should be a cache load, not a full walk
+    // of every mounted drive. The same slot is also used by Update Gamelist /
+    // Scrape Now; those later calls are explicit and therefore still scan.
+    if (automaticStartupPass && !kadiaGames().isEmpty())
+        return;
 
     if (!m_romScanner) {
         m_romScanCancelled = false;
@@ -518,7 +583,15 @@ void KadiaWindow::processSceneCommands()
         if (EmulatorManager::launch(m_scene.selectedGameSystem(), path, this)) {
             m_activeGamePath = path;
             m_activeGameStarted = QDateTime::currentDateTimeUtc();
-            refreshKadiaGameLibrary();
+            updateKadiaGameFromPath(path);
+
+            // Give the emulator exclusive ownership of the display transition.
+            // Keeping a live D3D9 device while many emulators switch to their
+            // own fullscreen device was the main background-crash path.
+            m_timer.stop();
+            m_renderer.shutdown();
+            m_rendererAttempted = false;
+            QTimer::singleShot(1500, this, SLOT(resumeRenderingAfterExternalLaunch()));
         }
         return;
     }

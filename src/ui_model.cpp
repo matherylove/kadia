@@ -3,6 +3,7 @@
 #include "game_stats.h"
 #include <QDir>
 #include <QFileInfo>
+#include <QTextCodec>
 #include <algorithm>
 
 namespace {
@@ -35,6 +36,34 @@ KadiaGameSort &gameSortStorage()
 {
     static KadiaGameSort sort = SortAlphabetical;
     return sort;
+}
+
+
+static int mojibakeScore(const QString &text)
+{
+    int score = 0;
+    for (int i = 0; i < text.size(); ++i) {
+        const ushort u = text.at(i).unicode();
+        if (u == 0x00C2 || u == 0x00C3 || u == 0x00E2 || u == 0xFFFD)
+            ++score;
+    }
+    return score;
+}
+
+static QString repairDisplayEncoding(const QString &text)
+{
+    if (text.isEmpty() || mojibakeScore(text) == 0)
+        return text;
+
+    QTextCodec *win1252 = QTextCodec::codecForName("Windows-1252");
+    if (!win1252 || !win1252->canEncode(text))
+        return text;
+
+    const QByteArray bytes = win1252->fromUnicode(text);
+    const QString decoded = QString::fromUtf8(bytes.constData(), bytes.size());
+    if (decoded.contains(QChar(0xFFFD)))
+        return text;
+    return mojibakeScore(decoded) < mojibakeScore(text) ? decoded : text;
 }
 
 static bool gameMatchesFilter(const KadiaGameInfo &game, const QString &rawFilter)
@@ -108,11 +137,11 @@ static bool buildKadiaGameFromRecord(const RomCatalogRecord &record, KadiaGameIn
         system.compare(QStringLiteral("None (ignore)"), Qt::CaseInsensitive) == 0)
         return false;
 
-    QString title = record.scrapedTitle.simplified();
+    QString title = repairDisplayEncoding(record.scrapedTitle.simplified());
     if (title.isEmpty())
-        title = record.internalTitle.simplified();
+        title = repairDisplayEncoding(record.internalTitle.simplified());
     if (title.isEmpty())
-        title = record.internalId.simplified();
+        title = repairDisplayEncoding(record.internalId.simplified());
     if (title.isEmpty())
         title = system + QStringLiteral(" ROM");
 
@@ -120,7 +149,7 @@ static bool buildKadiaGameFromRecord(const RomCatalogRecord &record, KadiaGameIn
     if (!record.format.isEmpty())
         subtitle += QStringLiteral("  -  ") + record.format;
 
-    QString description = record.scrapedDescription.simplified();
+    QString description = repairDisplayEncoding(record.scrapedDescription.simplified());
     if (description.isEmpty())
         description = QDir::toNativeSeparators(record.path);
 
@@ -131,7 +160,9 @@ static bool buildKadiaGameFromRecord(const RomCatalogRecord &record, KadiaGameIn
     out->path = record.path;
     out->coverPath = record.coverArtPath;
     out->releaseYear = record.releaseYear;
-    GameStats::ensureAdded(record.path, record.dateAdded);
+    // Startup/library rebuilds are read-only with respect to game-stats.ini.
+    // Date-added already lives in the ROM catalog, so there is no reason to
+    // manufacture a stats entry for every ROM just to display the library.
     const KadiaGameStats stats = GameStats::load(record.path);
     out->dateAdded = stats.dateAdded.isValid() ? stats.dateAdded : record.dateAdded;
     out->lastPlayed = stats.lastPlayed;
@@ -180,6 +211,8 @@ void refreshKadiaGameLibrary()
     QVector<KadiaGameInfo> rebuilt;
     rebuilt.reserve(records.size());
 
+    // This pass is deliberately read-only. In particular it never creates or
+    // rewrites game-stats.ini while Kadia is starting.
     for (int i = 0; i < records.size(); ++i) {
         KadiaGameInfo game;
         if (buildKadiaGameFromRecord(records.at(i), &game))
@@ -253,25 +286,49 @@ const QVector<KadiaSectionInfo> &kadiaSections()
             { QStringLiteral("View Style"), QStringLiteral(""), QStringLiteral("View Style"), QStringLiteral("Change the gamelist presentation for the current theme.") },
             { QStringLiteral("Game Options"), QStringLiteral(""), QStringLiteral("Game Options"), QStringLiteral("Open per-game actions, metadata and advanced emulator options.") },
         } },
-        { QStringLiteral("Consoles"), QStringLiteral("Home systems"), {
-            { QStringLiteral("Nintendo"), QStringLiteral(""), QStringLiteral("Nintendo"), QStringLiteral("Nintendo home-console libraries.") },
-            { QStringLiteral("Super Nintendo"), QStringLiteral(""), QStringLiteral("Super Nintendo"), QStringLiteral("16-bit Super Nintendo library.") },
-            { QStringLiteral("Sega"), QStringLiteral(""), QStringLiteral("Sega"), QStringLiteral("Master System, Genesis / Mega Drive, Saturn and Dreamcast.") },
-            { QStringLiteral("PlayStation"), QStringLiteral(""), QStringLiteral("PlayStation"), QStringLiteral("PlayStation family libraries.") },
-            { QStringLiteral("Xbox"), QStringLiteral(""), QStringLiteral("Xbox"), QStringLiteral("Xbox-family libraries when configured.") },
-            { QStringLiteral("Atari"), QStringLiteral(""), QStringLiteral("Atari"), QStringLiteral("Atari home-console collections.") },
-            { QStringLiteral("NEC"), QStringLiteral(""), QStringLiteral("NEC"), QStringLiteral("PC Engine / TurboGrafx and related systems.") },
+        { QStringLiteral("Consoles"), QStringLiteral("Home systems by console"), {
+            { QStringLiteral("Nintendo Entertainment System"), QStringLiteral(""), QStringLiteral("Nintendo Entertainment System"), QStringLiteral("Nintendo Entertainment System / Famicom library.") },
+            { QStringLiteral("Super Nintendo"), QStringLiteral(""), QStringLiteral("Super Nintendo"), QStringLiteral("Super Nintendo / Super Famicom library.") },
+            { QStringLiteral("Nintendo 64"), QStringLiteral(""), QStringLiteral("Nintendo 64"), QStringLiteral("Nintendo 64 library.") },
+            { QStringLiteral("Nintendo GameCube"), QStringLiteral(""), QStringLiteral("Nintendo GameCube"), QStringLiteral("Nintendo GameCube library.") },
+            { QStringLiteral("Nintendo Wii"), QStringLiteral(""), QStringLiteral("Nintendo Wii"), QStringLiteral("Nintendo Wii library.") },
+            { QStringLiteral("Nintendo Wii U"), QStringLiteral(""), QStringLiteral("Nintendo Wii U"), QStringLiteral("Nintendo Wii U library.") },
+            { QStringLiteral("Nintendo Switch"), QStringLiteral(""), QStringLiteral("Nintendo Switch"), QStringLiteral("Nintendo Switch library.") },
+            { QStringLiteral("Sega Master System"), QStringLiteral(""), QStringLiteral("Sega Master System"), QStringLiteral("Sega Master System / Mark III library.") },
+            { QStringLiteral("Sega Genesis / Mega Drive"), QStringLiteral(""), QStringLiteral("Sega Genesis / Mega Drive"), QStringLiteral("Sega Genesis / Mega Drive library.") },
+            { QStringLiteral("Sega Saturn"), QStringLiteral(""), QStringLiteral("Sega Saturn"), QStringLiteral("Sega Saturn library.") },
+            { QStringLiteral("Sega Dreamcast"), QStringLiteral(""), QStringLiteral("Sega Dreamcast"), QStringLiteral("Sega Dreamcast library.") },
+            { QStringLiteral("PlayStation"), QStringLiteral(""), QStringLiteral("PlayStation"), QStringLiteral("Original PlayStation library.") },
+            { QStringLiteral("PlayStation 2"), QStringLiteral(""), QStringLiteral("PlayStation 2"), QStringLiteral("PlayStation 2 library.") },
+            { QStringLiteral("PlayStation 3"), QStringLiteral(""), QStringLiteral("PlayStation 3"), QStringLiteral("PlayStation 3 library.") },
+            { QStringLiteral("Xbox"), QStringLiteral(""), QStringLiteral("Xbox"), QStringLiteral("Original Xbox library.") },
+            { QStringLiteral("Xbox 360"), QStringLiteral(""), QStringLiteral("Xbox 360"), QStringLiteral("Xbox 360 library.") },
+            { QStringLiteral("Atari 2600"), QStringLiteral(""), QStringLiteral("Atari 2600"), QStringLiteral("Atari 2600 library.") },
+            { QStringLiteral("Atari 5200"), QStringLiteral(""), QStringLiteral("Atari 5200"), QStringLiteral("Atari 5200 library.") },
+            { QStringLiteral("Atari 7800"), QStringLiteral(""), QStringLiteral("Atari 7800"), QStringLiteral("Atari 7800 library.") },
+            { QStringLiteral("PC Engine / TurboGrafx-16"), QStringLiteral(""), QStringLiteral("PC Engine / TurboGrafx-16"), QStringLiteral("NEC PC Engine / TurboGrafx-16 library.") },
+            { QStringLiteral("Neo Geo"), QStringLiteral(""), QStringLiteral("Neo Geo"), QStringLiteral("SNK Neo Geo library.") },
         } },
-        { QStringLiteral("Handhelds"), QStringLiteral("Portable systems"), {
+        { QStringLiteral("Handhelds"), QStringLiteral("Portable systems by console"), {
             { QStringLiteral("Game Boy"), QStringLiteral(""), QStringLiteral("Game Boy"), QStringLiteral("Nintendo Game Boy library.") },
             { QStringLiteral("Game Boy Color"), QStringLiteral(""), QStringLiteral("Game Boy Color"), QStringLiteral("Game Boy Color collection.") },
-            { QStringLiteral("Game Boy Advance"), QStringLiteral(""), QStringLiteral("Game Boy Advance"), QStringLiteral("32-bit Nintendo handheld collection.") },
-            { QStringLiteral("Nintendo DS"), QStringLiteral(""), QStringLiteral("Nintendo DS"), QStringLiteral("Dual-screen Nintendo library.") },
-            { QStringLiteral("Nintendo 3DS"), QStringLiteral(""), QStringLiteral("Nintendo 3DS"), QStringLiteral("Nintendo 3DS collection when configured.") },
-            { QStringLiteral("PSP"), QStringLiteral(""), QStringLiteral("PSP"), QStringLiteral("PlayStation Portable library.") },
-            { QStringLiteral("PS Vita"), QStringLiteral(""), QStringLiteral("PS Vita"), QStringLiteral("PlayStation Vita library when configured.") },
-            { QStringLiteral("Game Gear"), QStringLiteral(""), QStringLiteral("Game Gear"), QStringLiteral("Sega Game Gear collection.") },
+            { QStringLiteral("Game Boy Advance"), QStringLiteral(""), QStringLiteral("Game Boy Advance"), QStringLiteral("Game Boy Advance collection.") },
+            { QStringLiteral("Nintendo DS"), QStringLiteral(""), QStringLiteral("Nintendo DS"), QStringLiteral("Nintendo DS library.") },
+            { QStringLiteral("Nintendo 3DS"), QStringLiteral(""), QStringLiteral("Nintendo 3DS"), QStringLiteral("Nintendo 3DS library.") },
+            { QStringLiteral("PlayStation Portable"), QStringLiteral(""), QStringLiteral("PlayStation Portable"), QStringLiteral("PlayStation Portable / PSP library.") },
+            { QStringLiteral("PlayStation Vita"), QStringLiteral(""), QStringLiteral("PlayStation Vita"), QStringLiteral("PlayStation Vita library.") },
+            { QStringLiteral("Sega Game Gear"), QStringLiteral(""), QStringLiteral("Sega Game Gear"), QStringLiteral("Sega Game Gear collection.") },
             { QStringLiteral("Atari Lynx"), QStringLiteral(""), QStringLiteral("Atari Lynx"), QStringLiteral("Atari Lynx handheld collection.") },
+            { QStringLiteral("Neo Geo Pocket"), QStringLiteral(""), QStringLiteral("Neo Geo Pocket"), QStringLiteral("SNK Neo Geo Pocket library.") },
+            { QStringLiteral("Neo Geo Pocket Color"), QStringLiteral(""), QStringLiteral("Neo Geo Pocket Color"), QStringLiteral("SNK Neo Geo Pocket Color library.") },
+            { QStringLiteral("WonderSwan"), QStringLiteral(""), QStringLiteral("WonderSwan"), QStringLiteral("Bandai WonderSwan library.") },
+            { QStringLiteral("WonderSwan Color"), QStringLiteral(""), QStringLiteral("WonderSwan Color"), QStringLiteral("Bandai WonderSwan Color library.") },
+        } },
+        { QStringLiteral("Computers"), QStringLiteral("Classic computer systems"), {
+            { QStringLiteral("MSX"), QStringLiteral(""), QStringLiteral("MSX"), QStringLiteral("MSX computer-game library.") },
+            { QStringLiteral("Commodore 64"), QStringLiteral(""), QStringLiteral("Commodore 64"), QStringLiteral("Commodore 64 library.") },
+            { QStringLiteral("Amiga"), QStringLiteral(""), QStringLiteral("Amiga"), QStringLiteral("Commodore Amiga library.") },
+            { QStringLiteral("DOS / PC"), QStringLiteral(""), QStringLiteral("DOS / PC"), QStringLiteral("DOS and classic PC game library.") },
         } },
         { QStringLiteral("Arcade"), QStringLiteral("Arcade collections"), {
             { QStringLiteral("Arcade"), QStringLiteral(""), QStringLiteral("Arcade"), QStringLiteral("All games identified as arcade titles.") },

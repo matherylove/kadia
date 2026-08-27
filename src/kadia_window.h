@@ -48,6 +48,7 @@ protected:
 
 private slots:
     void frameTick();
+    void resumeRenderingAfterExternalLaunch();
     void onRomDiscovered(const QString &path, const QString &hint,
                          const QString &internalTitle, const QString &format);
     void onRomRecognized(const QString &path, const QString &system, const QString &title);
@@ -86,6 +87,7 @@ private:
     QQueue<PendingRom> m_romQueue;
     bool m_romDialogActive;
     bool m_romScanCancelled;
+    bool m_postStartupChecksCompleted;
     QString m_activeGamePath;
     QDateTime m_activeGameStarted;
 };

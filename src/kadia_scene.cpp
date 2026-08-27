@@ -7,8 +7,14 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFontDatabase>
+#include <QFontMetrics>
+#include <QImageReader>
 #include <QPixmap>
 #include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QRunnable>
+#include <QThreadPool>
 #include <QFile>
 #include <QtCore/qendian.h>
 #include <QLinearGradient>
@@ -34,7 +40,7 @@ const qreal kShellRight = 54.0; // frame inset 10 + shell padding 44
 const qreal kTopbarHeight = 74.0;
 const qreal kHubLeft = kShellLeft + 74.0;
 const qreal kHubTop = kShellTop + kTopbarHeight + 6.0;
-const qreal kPanelTotalWidth = 344.0; // 300 content + 44 horizontal padding
+const qreal kPanelTotalWidth = 344.0; // maximum panel width
 const qreal kPanelRightMargin = 24.0;
 const qreal kStripX = kHubLeft;
 
@@ -47,15 +53,34 @@ static QRectF frameRect()
 }
 static qreal hubWidth()
 {
-    return qMin<qreal>(1180.0, canvasWidth() * 0.84);
+    // Never let the hub extend past the right shell margin.
+    return qMax<qreal>(120.0, qMin<qreal>(1180.0, canvasWidth() - kHubLeft - kShellRight));
+}
+static bool detailsPanelVisible()
+{
+    return canvasWidth() >= 700.0;
+}
+static qreal panelWidth()
+{
+    // Keep the details panel from stealing the tile strip on 800/1024-wide
+    // displays. On very narrow windows it is hidden entirely.
+    if (!detailsPanelVisible())
+        return 0.0;
+    return qBound<qreal>(220.0, canvasWidth() * 0.27, kPanelTotalWidth);
+}
+static qreal panelRightMargin()
+{
+    return canvasWidth() < 900.0 ? 14.0 : kPanelRightMargin;
 }
 static qreal panelX()
 {
-    return kHubLeft + hubWidth() - kPanelRightMargin - kPanelTotalWidth;
+    return kHubLeft + hubWidth() - panelRightMargin() - panelWidth();
 }
 static qreal stripWidth()
 {
-    return qMax<qreal>(260.0, panelX() - kStripX - 24.0);
+    if (!detailsPanelVisible())
+        return qMax<qreal>(48.0, hubWidth());
+    return qMax<qreal>(48.0, panelX() - kStripX - 18.0);
 }
 static qreal footerCenterY()
 {
@@ -81,9 +106,9 @@ static QColor withAlpha(const QColor &c, int alpha)
 
 struct CoverCacheEntry
 {
-    bool tried;
-    QPixmap pixmap;
-    CoverCacheEntry() : tried(false) {}
+    int state; // 0 = not requested, 1 = loading, 2 = complete (possibly empty)
+    QImage image;
+    CoverCacheEntry() : state(0) {}
 };
 
 static QHash<QString, CoverCacheEntry> &coverCache()
@@ -92,22 +117,67 @@ static QHash<QString, CoverCacheEntry> &coverCache()
     return cache;
 }
 
-static const QPixmap *coverPixmapForPath(const QString &path)
+static QMutex &coverCacheMutex()
+{
+    static QMutex mutex;
+    return mutex;
+}
+
+static QImage decodeCoverThumbnail(const QString &key)
+{
+    if (!QFileInfo(key).exists())
+        return QImage();
+
+    QImageReader reader(key);
+    const QSize sourceSize = reader.size();
+    if (sourceSize.isValid()) {
+        QSize wanted = sourceSize;
+        wanted.scale(QSize(320, 420), Qt::KeepAspectRatio);
+        if (wanted.isValid() && wanted != sourceSize)
+            reader.setScaledSize(wanted);
+    }
+    return reader.read();
+}
+
+class CoverLoadTask : public QRunnable
+{
+public:
+    explicit CoverLoadTask(const QString &key) : m_key(key) {}
+    void run() Q_DECL_OVERRIDE
+    {
+        const QImage image = decodeCoverThumbnail(m_key);
+        QMutexLocker locker(&coverCacheMutex());
+        CoverCacheEntry &entry = coverCache()[m_key];
+        entry.image = image;
+        entry.state = 2;
+    }
+private:
+    QString m_key;
+};
+
+static QImage coverImageForPath(const QString &path)
 {
     const QString key = QDir::cleanPath(path);
     if (key.isEmpty())
-        return 0;
-    CoverCacheEntry &entry = coverCache()[key];
-    if (!entry.tried) {
-        entry.tried = true;
-        if (QFileInfo(key).exists())
-            entry.pixmap.load(key);
-    }
-    if (entry.pixmap.isNull())
-        return 0;
-    return &entry.pixmap;
-}
+        return QImage();
 
+    bool queueLoad = false;
+    QImage ready;
+    {
+        QMutexLocker locker(&coverCacheMutex());
+        CoverCacheEntry &entry = coverCache()[key];
+        if (entry.state == 2)
+            return entry.image;
+        if (entry.state == 0) {
+            entry.state = 1;
+            queueLoad = true;
+        }
+    }
+
+    if (queueLoad)
+        QThreadPool::globalInstance()->start(new CoverLoadTask(key), -1);
+    return ready;
+}
 
 static QHash<QString, QImage> &brandIconCache()
 {
@@ -145,21 +215,59 @@ static const QImage *rawArgbIcon(const QString &resource)
 static QString consoleBrandResource(const QString &section, const QString &label)
 {
     const QString key = (section + QLatin1Char(' ') + label).toLower();
-    if (key.contains(QStringLiteral("ps vita"))) return QStringLiteral(":/assets/console_icons/psvita.argb");
+    if (key.contains(QStringLiteral("ps vita")) || key.contains(QStringLiteral("playstation vita"))) return QStringLiteral(":/assets/console_icons/psvita.argb");
     if (key.contains(QStringLiteral("psp")) || key.contains(QStringLiteral("portable"))) return QStringLiteral(":/assets/console_icons/psp.argb");
     if (key.contains(QStringLiteral("playstation 3"))) return QStringLiteral(":/assets/console_icons/playstation3.argb");
     if (key.contains(QStringLiteral("playstation 2"))) return QStringLiteral(":/assets/console_icons/playstation2.argb");
     if (key.contains(QStringLiteral("playstation"))) return QStringLiteral(":/assets/console_icons/playstation.argb");
-    if (key.contains(QStringLiteral("sega")) || key.contains(QStringLiteral("game gear"))) return QStringLiteral(":/assets/console_icons/sega.argb");
-    if (key.contains(QStringLiteral("atari")) || key.contains(QStringLiteral("lynx"))) return QStringLiteral(":/assets/console_icons/atari.argb");
+    if (label.compare(QStringLiteral("Sega"), Qt::CaseInsensitive) == 0) return QStringLiteral(":/assets/console_icons/sega.argb");
+    if (label.compare(QStringLiteral("Atari"), Qt::CaseInsensitive) == 0) return QStringLiteral(":/assets/console_icons/atari.argb");
     return QString();
 }
-static qreal coverAspectForGame(const KadiaGameInfo &game)
+static const qreal kCarouselBaseWidth = 118.0;
+static const qreal kCarouselSelectedExtra = 54.0;
+
+static qreal carouselSelection(int index, int selected, int previous, qreal transition)
 {
-    const QPixmap *pm = coverPixmapForPath(game.coverPath);
-    if (pm && !pm->isNull() && pm->height() > 0)
-        return qBound<qreal>(0.55, qreal(pm->width()) / qreal(pm->height()), 1.65);
-    return 0.72;
+    if (selected == previous)
+        return index == selected ? 1.0 : 0.0;
+    if (index == selected)
+        return transition;
+    if (index == previous)
+        return 1.0 - transition;
+    return 0.0;
+}
+
+static qreal carouselCardWidth(qreal selection)
+{
+    // Do not inspect every cover just to lay out the carousel. Loading cover
+    // files here used to synchronously decode the entire library the first
+    // time a collection was opened. Only visible cards load their artwork.
+    return kCarouselBaseWidth + kCarouselSelectedExtra * qBound<qreal>(0.0, selection, 1.0);
+}
+
+static qreal carouselRawLeft(int index, int selected, int previous, qreal transition, qreal gap)
+{
+    qreal x = index * (kCarouselBaseWidth + gap);
+    if (selected == previous) {
+        if (selected < index)
+            x += kCarouselSelectedExtra;
+        return x;
+    }
+    if (selected < index)
+        x += kCarouselSelectedExtra * transition;
+    if (previous < index)
+        x += kCarouselSelectedExtra * (1.0 - transition);
+    return x;
+}
+
+static qreal carouselTotalWidth(int count, qreal gap)
+{
+    if (count <= 0)
+        return 0.0;
+    // There is always exactly one selected-width delta distributed between
+    // the old and new selection during the animation.
+    return count * kCarouselBaseWidth + kCarouselSelectedExtra + (count - 1) * gap;
 }
 }
 
@@ -353,7 +461,7 @@ void KadiaScene::handle(Action action)
         const QString section = sections[m_category].name;
         const bool browseSection = section == QStringLiteral("Home") || section == QStringLiteral("Games") ||
                                    section == QStringLiteral("Consoles") || section == QStringLiteral("Handhelds") ||
-                                   section == QStringLiteral("Arcade") || section == QStringLiteral("PC Games") ||
+                                   section == QStringLiteral("Computers") || section == QStringLiteral("Arcade") || section == QStringLiteral("PC Games") ||
                                    section == QStringLiteral("Collections") || section == QStringLiteral("Recent") ||
                                    section == QStringLiteral("Favorites") || section == QStringLiteral("Achievements");
         if (browseSection) {
@@ -422,7 +530,8 @@ void KadiaScene::handle(Action action)
             m_previousGame = m_game; m_library = true; m_gallery = false; m_gameChangeAge = 1.0; return;
         }
         const bool gameBrowse = section == QStringLiteral("Games") || section == QStringLiteral("Consoles") ||
-                                section == QStringLiteral("Handhelds") || section == QStringLiteral("Arcade") ||
+                                section == QStringLiteral("Handhelds") || section == QStringLiteral("Computers") ||
+                                section == QStringLiteral("Arcade") ||
                                 section == QStringLiteral("PC Games") || section == QStringLiteral("Collections") ||
                                 section == QStringLiteral("Recent") || section == QStringLiteral("Favorites") ||
                                 section == QStringLiteral("Achievements");
@@ -518,7 +627,12 @@ bool KadiaScene::hoverAt(const QPointF &point)
             return false;
 
         if (m_gallery || m_galleryBlend > 0.45) {
-            for (int i = 0; i < games.size(); ++i) {
+            const int columns = galleryColumns();
+            const int selectedRow = qMax(0, m_game / columns);
+            const int firstRow = qMax(0, selectedRow - 1);
+            const int first = firstRow * columns;
+            const int last = qMin(games.size() - 1, (firstRow + 2) * columns - 1);
+            for (int i = first; i <= last; ++i) {
                 const QRectF card = galleryCardRect(i, games.size());
                 if (card.isValid() && card.contains(point)) {
                     if (m_game != i) {
@@ -537,43 +651,24 @@ bool KadiaScene::hoverAt(const QPointF &point)
         const qreal viewportW = stripWidth();
         const qreal t = easeOutCubic(qMin<qreal>(1.0, m_gameChangeAge / 0.18));
 
-        QVector<qreal> widths;
-        QVector<qreal> selections;
-        widths.reserve(games.size());
-        selections.reserve(games.size());
-        for (int i = 0; i < games.size(); ++i) {
-            qreal sel = 0.0;
-            if (m_game == m_previousGame)
-                sel = i == m_game ? 1.0 : 0.0;
-            else if (i == m_game)
-                sel = t;
-            else if (i == m_previousGame)
-                sel = 1.0 - t;
-            selections.push_back(sel);
-            const qreal targetH = 160.0 + (210.0 - 160.0) * sel;
-        const qreal labelH = 34.0 + 8.0 * sel;
-        const qreal artH = qMax<qreal>(72.0, targetH - labelH - 12.0);
-        const qreal width = qBound<qreal>(105.0, artH * coverAspectForGame(games.at(i)) + 14.0, 220.0);
-        widths.push_back(width);
-        }
-
-        qreal raw = 0.0;
-        qreal selectedCenter = 0.0;
-        for (int i = 0; i < games.size(); ++i) {
-            if (i == m_game)
-                selectedCenter = raw + widths[i] * 0.5;
-            raw += widths[i] + gap;
-        }
-        const qreal totalW = qMax<qreal>(0.0, raw - gap);
+        const qreal selectedSel = carouselSelection(m_game, m_game, m_previousGame, t);
+        const qreal selectedCenter = carouselRawLeft(m_game, m_game, m_previousGame, t, gap) +
+                                     carouselCardWidth(selectedSel) * 0.5;
+        const qreal totalW = carouselTotalWidth(games.size(), gap);
         const qreal preferred = qMin(viewportW * 0.56, 530.0);
         const qreal scroll = qBound<qreal>(0.0, selectedCenter - preferred,
                                           qMax<qreal>(0.0, totalW - viewportW));
 
-        qreal x = kStripX - scroll;
-        for (int i = 0; i < games.size(); ++i) {
-            const qreal h = 160.0 + (210.0 - 160.0) * selections[i];
-            const qreal lift = -10.0 * selections[i];
-            const QRectF card(x, y + lift, widths[i], h);
+        const int first = qMax(0, static_cast<int>(scroll / (kCarouselBaseWidth + gap)) - 2);
+        const int last = qMin(games.size() - 1,
+                              static_cast<int>((scroll + viewportW) / (kCarouselBaseWidth + gap)) + 3);
+        for (int i = first; i <= last; ++i) {
+            const qreal sel = carouselSelection(i, m_game, m_previousGame, t);
+            const qreal width = carouselCardWidth(sel);
+            const qreal x = kStripX - scroll + carouselRawLeft(i, m_game, m_previousGame, t, gap);
+            const qreal h = 160.0 + (210.0 - 160.0) * sel;
+            const qreal lift = -10.0 * sel;
+            const QRectF card(x, y + lift, width, h);
             if (card.contains(point)) {
                 if (m_game != i) {
                     m_previousGame = m_game;
@@ -582,7 +677,6 @@ bool KadiaScene::hoverAt(const QPointF &point)
                 }
                 return true;
             }
-            x += widths[i] + gap;
         }
         return false;
     }
@@ -1150,9 +1244,11 @@ void KadiaScene::drawHome(QPainter &p)
                Qt::AlignLeft | Qt::AlignVCenter, section.caption);
     p.restore();
 
-    const KadiaTileInfo &info = section.tiles[qBound(0, m_tile, section.tiles.size() - 1)];
-    const QRectF panel(panelX(), kHubTop + 308.0, kPanelTotalWidth, 176.0 + 40.0);
-    drawDescriptionPanel(p, panel, info.title, section.name, info.description, false);
+    if (detailsPanelVisible()) {
+        const KadiaTileInfo &info = section.tiles[qBound(0, m_tile, section.tiles.size() - 1)];
+        const QRectF panel(panelX(), kHubTop + 308.0, panelWidth(), 176.0 + 40.0);
+        drawDescriptionPanel(p, panel, info.title, section.name, info.description, false);
+    }
 }
 
 void KadiaScene::drawLibrary(QPainter &p)
@@ -1172,7 +1268,7 @@ void KadiaScene::drawLibrary(QPainter &p)
     p.setFont(fontForPixelSize(18, QFont::Light));
     p.setPen(QColor(255, 248, 231, 118));
     p.drawText(QRectF(kHubLeft, railTop + 90.0, 520.0, 34.0), Qt::AlignLeft | Qt::AlignVCenter,
-               QStringLiteral("%1 view  •  Sort: %2").arg(m_gallery ? QStringLiteral("Gallery") : QStringLiteral("Carousel"), kadiaGameSortLabel()));
+               QStringLiteral("%1 view  |  Sort: %2").arg(m_gallery ? QStringLiteral("Gallery") : QStringLiteral("Carousel"), kadiaGameSortLabel()));
     p.drawText(QRectF(kHubLeft, railTop + 124.0, 360.0, 34.0), Qt::AlignLeft | Qt::AlignVCenter,
                QStringLiteral("Favorites"));
     p.drawText(QRectF(kHubLeft, railTop + 158.0, 360.0, 34.0), Qt::AlignLeft | Qt::AlignVCenter,
@@ -1213,64 +1309,38 @@ void KadiaScene::drawLibrary(QPainter &p)
     p.setOpacity(1.0 - m_galleryBlend);
     const qreal t = easeOutCubic(qMin<qreal>(1.0, m_gameChangeAge / 0.18));
 
-    QVector<qreal> widths;
-    widths.reserve(games.size());
-    for (int i = 0; i < games.size(); ++i) {
-        qreal sel = 0.0;
-        if (m_game == m_previousGame)
-            sel = i == m_game ? 1.0 : 0.0;
-        else if (i == m_game)
-            sel = t;
-        else if (i == m_previousGame)
-            sel = 1.0 - t;
-        const qreal targetH = 160.0 + (210.0 - 160.0) * sel;
-        const qreal labelH = 34.0 + 8.0 * sel;
-        const qreal artH = qMax<qreal>(72.0, targetH - labelH - 12.0);
-        const qreal width = qBound<qreal>(105.0, artH * coverAspectForGame(games.at(i)) + 14.0, 220.0);
-        widths.push_back(width);
-    }
-
-    qreal selectedCenter = 0.0;
-    qreal x = 0.0;
-    for (int i = 0; i < games.size(); ++i) {
-        if (i == m_game)
-            selectedCenter = x + widths[i] * 0.5;
-        x += widths[i] + gap;
-    }
-    const qreal totalW = qMax<qreal>(0.0, x - gap);
+    const qreal selectedSel = carouselSelection(m_game, m_game, m_previousGame, t);
+    const qreal selectedCenter = carouselRawLeft(m_game, m_game, m_previousGame, t, gap) +
+                                 carouselCardWidth(selectedSel) * 0.5;
+    const qreal totalW = carouselTotalWidth(games.size(), gap);
     const qreal preferred = qMin(viewportW * 0.56, 530.0);
     const qreal scroll = qBound<qreal>(0.0, selectedCenter - preferred, qMax<qreal>(0.0, totalW - viewportW));
 
-    x = kStripX - scroll;
+    const int first = qMax(0, static_cast<int>(scroll / (kCarouselBaseWidth + gap)) - 2);
+    const int last = qMin(games.size() - 1,
+                          static_cast<int>((scroll + viewportW) / (kCarouselBaseWidth + gap)) + 3);
     p.save();
     p.setClipRect(QRectF(kStripX, y - 14.0, viewportW, 230.0));
-    for (int i = 0; i < games.size(); ++i) {
-        qreal sel = 0.0;
-        if (m_game == m_previousGame)
-            sel = i == m_game ? 1.0 : 0.0;
-        else if (i == m_game)
-            sel = t;
-        else if (i == m_previousGame)
-            sel = 1.0 - t;
-
+    for (int i = first; i <= last; ++i) {
+        const qreal sel = carouselSelection(i, m_game, m_previousGame, t);
+        const qreal width = carouselCardWidth(sel);
+        const qreal x = kStripX - scroll + carouselRawLeft(i, m_game, m_previousGame, t, gap);
         const qreal h = 160.0 + (210.0 - 160.0) * sel;
         const qreal lift = -10.0 * sel;
-        const QRectF card(x, y + lift, widths[i], h);
-        if (card.right() >= kStripX - 4.0 && card.left() <= kStripX + viewportW + 4.0)
-            drawGameCard(p, card, sel, i);
-        x += widths[i] + gap;
+        const QRectF card(x, y + lift, width, h);
+        drawGameCard(p, card, sel, i);
     }
     p.restore();
 
-    if (!games.isEmpty()) {
+    if (!games.isEmpty() && detailsPanelVisible()) {
         const KadiaGameInfo &game = games[qBound(0, m_game, games.size() - 1)];
-        const QRectF panel(panelX(), kHubTop + 302.0, kPanelTotalWidth, 204.0);
+        const QRectF panel(panelX(), kHubTop + 302.0, panelWidth(), 204.0);
         QString detail = game.description;
         QStringList stats;
         if (!game.releaseYear.isEmpty()) stats << QStringLiteral("Released %1").arg(game.releaseYear);
         stats << GameStats::humanPlayTime(game.playSeconds);
         if (game.dateAdded.isValid()) stats << QStringLiteral("Added %1").arg(game.dateAdded.date().toString(Qt::ISODate));
-        if (!stats.isEmpty()) detail = stats.join(QStringLiteral("  •  ")) + QStringLiteral("\n") + detail;
+        if (!stats.isEmpty()) detail = stats.join(QStringLiteral("  |  ")) + QStringLiteral("\n") + detail;
         drawDescriptionPanel(p, panel, game.title, game.subtitle, detail, true);
     }
     p.restore();
@@ -1278,8 +1348,8 @@ void KadiaScene::drawLibrary(QPainter &p)
 
 int KadiaScene::galleryColumns() const
 {
-    const qreal available = qMax<qreal>(420.0, stripWidth());
-    return qBound(3, static_cast<int>(available / 150.0), 7);
+    const qreal available = qMax<qreal>(48.0, stripWidth());
+    return qBound(1, static_cast<int>(available / 135.0), 7);
 }
 
 QRectF KadiaScene::galleryCardRect(int index, int count) const
@@ -1309,7 +1379,12 @@ void KadiaScene::drawGallery(QPainter &p, const QVector<KadiaGameInfo> &games, q
     p.setOpacity(qBound<qreal>(0.0, opacity, 1.0));
     p.setClipRect(QRectF(kStripX, kHubTop + 276.0, stripWidth(), 390.0));
     const qreal transition = easeOutCubic(qMin<qreal>(1.0, m_gameChangeAge / 0.16));
-    for (int i = 0; i < games.size(); ++i) {
+    const int columns = galleryColumns();
+    const int selectedRow = qMax(0, m_game / columns);
+    const int firstRow = qMax(0, selectedRow - 1);
+    const int first = firstRow * columns;
+    const int last = qMin(games.size() - 1, (firstRow + 2) * columns - 1);
+    for (int i = first; i <= last; ++i) {
         QRectF card = galleryCardRect(i, games.size());
         if (!card.isValid()) continue;
         qreal sel = i == m_game ? transition : (i == m_previousGame ? 1.0 - transition : 0.0);
@@ -1323,14 +1398,14 @@ void KadiaScene::drawGallery(QPainter &p, const QVector<KadiaGameInfo> &games, q
     }
     p.restore();
 
-    if (m_game >= 0 && m_game < games.size()) {
+    if (m_game >= 0 && m_game < games.size() && detailsPanelVisible()) {
         const KadiaGameInfo &game = games.at(m_game);
-        const QRectF panel(panelX(), kHubTop + 292.0, kPanelTotalWidth, 218.0);
+        const QRectF panel(panelX(), kHubTop + 292.0, panelWidth(), 218.0);
         QStringList stats;
         if (!game.releaseYear.isEmpty()) stats << QStringLiteral("Released %1").arg(game.releaseYear);
         stats << GameStats::humanPlayTime(game.playSeconds);
         if (game.lastPlayed.isValid()) stats << QStringLiteral("Last played %1").arg(game.lastPlayed.date().toString(Qt::ISODate));
-        QString detail = stats.join(QStringLiteral("  •  "));
+        QString detail = stats.join(QStringLiteral("  |  "));
         if (!detail.isEmpty()) detail += QStringLiteral("\n");
         detail += game.description;
         p.save(); p.setOpacity(opacity);
@@ -1517,6 +1592,87 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
             p.setOpacity(0.82 + 0.18 * selection);
             p.drawImage(target, *brand, QRectF(brand->rect()));
             p.restore();
+            p.restore();
+            return;
+        }
+    }
+
+    // Every concrete emulated system gets its own local vector badge. These
+    // are drawn directly with QPainter so they are available on the XP build
+    // without an SVG plugin. PlayStation models above still use their bundled
+    // marks; the remaining systems use a device-specific console/handheld
+    // silhouette plus the actual platform abbreviation instead of a generic
+    // manufacturer icon.
+    const bool platformSection = sectionKey == QStringLiteral("consoles") ||
+                                 sectionKey == QStringLiteral("handhelds") ||
+                                 sectionKey == QStringLiteral("computers") ||
+                                 sectionKey == QStringLiteral("arcade");
+    if (platformSection) {
+        QString badge;
+        const QString l = label.toLower();
+        if (l == QStringLiteral("nintendo entertainment system")) badge = QStringLiteral("NES");
+        else if (l == QStringLiteral("super nintendo")) badge = QStringLiteral("SNES");
+        else if (l == QStringLiteral("nintendo 64")) badge = QStringLiteral("N64");
+        else if (l == QStringLiteral("nintendo gamecube")) badge = QStringLiteral("GC");
+        else if (l == QStringLiteral("nintendo wii")) badge = QStringLiteral("Wii");
+        else if (l == QStringLiteral("nintendo wii u")) badge = QStringLiteral("Wii U");
+        else if (l == QStringLiteral("nintendo switch")) badge = QStringLiteral("SWITCH");
+        else if (l == QStringLiteral("sega master system")) badge = QStringLiteral("MASTER");
+        else if (l == QStringLiteral("sega genesis / mega drive")) badge = QStringLiteral("MD / GEN");
+        else if (l == QStringLiteral("sega saturn")) badge = QStringLiteral("SATURN");
+        else if (l == QStringLiteral("sega dreamcast")) badge = QStringLiteral("DC");
+        else if (l == QStringLiteral("xbox")) badge = QStringLiteral("XBOX");
+        else if (l == QStringLiteral("xbox 360")) badge = QStringLiteral("XBOX 360");
+        else if (l == QStringLiteral("atari 2600")) badge = QStringLiteral("2600");
+        else if (l == QStringLiteral("atari 5200")) badge = QStringLiteral("5200");
+        else if (l == QStringLiteral("atari 7800")) badge = QStringLiteral("7800");
+        else if (l == QStringLiteral("pc engine / turbografx-16")) badge = QStringLiteral("PCE / TG16");
+        else if (l == QStringLiteral("neo geo")) badge = QStringLiteral("NEO GEO");
+        else if (l == QStringLiteral("game boy")) badge = QStringLiteral("GB");
+        else if (l == QStringLiteral("game boy color")) badge = QStringLiteral("GBC");
+        else if (l == QStringLiteral("game boy advance")) badge = QStringLiteral("GBA");
+        else if (l == QStringLiteral("nintendo ds")) badge = QStringLiteral("DS");
+        else if (l == QStringLiteral("nintendo 3ds")) badge = QStringLiteral("3DS");
+        else if (l == QStringLiteral("sega game gear")) badge = QStringLiteral("GAME GEAR");
+        else if (l == QStringLiteral("atari lynx")) badge = QStringLiteral("LYNX");
+        else if (l == QStringLiteral("neo geo pocket")) badge = QStringLiteral("NGP");
+        else if (l == QStringLiteral("neo geo pocket color")) badge = QStringLiteral("NGPC");
+        else if (l == QStringLiteral("wonderswan")) badge = QStringLiteral("WS");
+        else if (l == QStringLiteral("wonderswan color")) badge = QStringLiteral("WSC");
+        else if (l == QStringLiteral("msx")) badge = QStringLiteral("MSX");
+        else if (l == QStringLiteral("commodore 64")) badge = QStringLiteral("C64");
+        else if (l == QStringLiteral("amiga")) badge = QStringLiteral("AMIGA");
+        else if (l == QStringLiteral("dos / pc")) badge = QStringLiteral("DOS / PC");
+        else if (l == QStringLiteral("arcade") || l == QStringLiteral("mame") || l == QStringLiteral("fbneo")) badge = QStringLiteral("ARCADE");
+
+        if (!badge.isEmpty()) {
+            const bool handheld = sectionKey == QStringLiteral("handhelds");
+            p.setPen(QPen(c, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(QColor(255, 248, 231, 18));
+            if (handheld) {
+                const QRectF body(center.x() - base * 1.10, center.y() - base * 1.20,
+                                  base * 2.20, base * 2.40);
+                p.drawRoundedRect(body, base * 0.28, base * 0.28);
+                p.drawRoundedRect(QRectF(center.x() - base * 0.76, center.y() - base * 0.78,
+                                         base * 1.52, base * 0.92), base * 0.08, base * 0.08);
+                p.drawEllipse(QPointF(center.x() - base * 0.55, center.y() + base * 0.58), base * 0.15, base * 0.15);
+                p.drawEllipse(QPointF(center.x() + base * 0.58, center.y() + base * 0.48), base * 0.12, base * 0.12);
+                p.drawEllipse(QPointF(center.x() + base * 0.82, center.y() + base * 0.66), base * 0.12, base * 0.12);
+            } else {
+                const QRectF body(center.x() - base * 1.25, center.y() - base * 0.72,
+                                  base * 2.50, base * 1.44);
+                p.drawRoundedRect(body, base * 0.16, base * 0.16);
+                p.drawLine(QPointF(body.left() + base * 0.28, center.y() + base * 0.35),
+                           QPointF(body.right() - base * 0.28, center.y() + base * 0.35));
+                p.drawEllipse(QPointF(body.right() - base * 0.30, body.top() + base * 0.28), base * 0.08, base * 0.08);
+            }
+            QFont badgeFont = fontForPixelSize(qMax(9, static_cast<int>(base * 0.48)), QFont::DemiBold);
+            badgeFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.4);
+            p.setFont(badgeFont);
+            p.setPen(QColor(255, 248, 231, 235));
+            const QRectF textRect(center.x() - base * 1.05, center.y() - base * 0.26,
+                                  base * 2.10, base * 0.52);
+            p.drawText(textRect, Qt::AlignCenter, badge);
             p.restore();
             return;
         }
@@ -2007,11 +2163,13 @@ void KadiaScene::drawDescriptionPanel(QPainter &p, const QRectF &rect,
 
     p.setFont(fontForPixelSize(withPlayHint ? 27 : 25, QFont::Light));
     p.setPen(QColor(255, 248, 231, 235));
-    p.drawText(QRectF(x, rect.top() + 20.0, width, 34.0), Qt::AlignLeft | Qt::AlignVCenter, title);
+    const QString shownTitle = QFontMetrics(p.font()).elidedText(title, Qt::ElideRight, qMax(20, static_cast<int>(width)));
+    p.drawText(QRectF(x, rect.top() + 20.0, width, 34.0), Qt::AlignLeft | Qt::AlignVCenter, shownTitle);
 
     p.setFont(fontForPixelSize(12, QFont::Normal));
     p.setPen(QColor(255, 248, 231, 108));
-    p.drawText(QRectF(x, rect.top() + 53.0, width, 20.0), Qt::AlignLeft | Qt::AlignVCenter, sub);
+    const QString shownSub = QFontMetrics(p.font()).elidedText(sub, Qt::ElideRight, qMax(20, static_cast<int>(width)));
+    p.drawText(QRectF(x, rect.top() + 53.0, width, 20.0), Qt::AlignLeft | Qt::AlignVCenter, shownSub);
 
     p.setFont(fontForPixelSize(13, QFont::Normal));
     p.setPen(QColor(255, 248, 231, 174));
@@ -2062,15 +2220,15 @@ void KadiaScene::drawGameCard(QPainter &p, const QRectF &rect, float selection, 
 
     const QVector<KadiaGameInfo> &games = kadiaGames();
     const KadiaGameInfo *game = (index >= 0 && index < games.size()) ? &games[index] : 0;
-    const QPixmap *cover = game ? coverPixmapForPath(game->coverPath) : 0;
+    const QImage cover = game ? coverImageForPath(game->coverPath) : QImage();
 
-    if (cover && !cover->isNull()) {
-        QSize scaled = cover->size();
+    if (!cover.isNull()) {
+        QSize scaled = cover.size();
         scaled.scale(artArea.size().toSize(), Qt::KeepAspectRatio);
         const QRectF target(artArea.left() + (artArea.width() - scaled.width()) * 0.5,
                             artArea.top() + (artArea.height() - scaled.height()) * 0.5,
                             scaled.width(), scaled.height());
-        p.drawPixmap(target, *cover, QRectF(0.0, 0.0, cover->width(), cover->height()));
+        p.drawImage(target, cover, QRectF(0.0, 0.0, cover.width(), cover.height()));
         p.fillRect(artArea, QColor(255,255,255,10));
     } else {
         QLinearGradient bg(rect.topLeft(), rect.bottomRight());
@@ -2098,8 +2256,10 @@ void KadiaScene::drawGameCard(QPainter &p, const QRectF &rect, float selection, 
     if (game) {
         p.setFont(fontForPixelSize(static_cast<int>(11.0 + 2.0 * selection), QFont::Normal));
         p.setPen(QColor(255,248,231,238));
+        const int textWidth = qMax(12, static_cast<int>(rect.width() - 18.0));
+        const QString shown = QFontMetrics(p.font()).elidedText(game->title, Qt::ElideRight, textWidth);
         p.drawText(QRectF(rect.left()+9.0, rect.bottom()-labelH, rect.width()-18.0, labelH),
-                   Qt::AlignLeft | Qt::AlignVCenter, game->title);
+                   Qt::AlignLeft | Qt::AlignVCenter, shown);
     }
     p.restore();
 }

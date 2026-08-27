@@ -768,7 +768,9 @@ QStringList pathsForClassification(const QString &wanted)
         const QString classification = s.value(QStringLiteral("classification")).toString();
         const QString path = QDir::fromNativeSeparators(s.value(QStringLiteral("path")).toString());
         s.endGroup();
-        if (classification.compare(wanted, Qt::CaseInsensitive) == 0 && !path.isEmpty() && QFileInfo(path).exists())
+        // The scanner is responsible for removing stale paths. Avoid a GUI-
+        // thread QFileInfo::exists() for every cached unknown ROM at startup.
+        if (classification.compare(wanted, Qt::CaseInsensitive) == 0 && !path.isEmpty())
             paths << path;
     }
     s.endGroup();

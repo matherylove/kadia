@@ -510,7 +510,7 @@ static QString metadataDescription(const DbEntry &entry)
     const QString base = entry.description.simplified();
     if (!base.isEmpty() && base.compare(entry.name, Qt::CaseInsensitive) != 0)
         details.prepend(base);
-    return details.join(QStringLiteral("  •  "));
+    return details.join(QStringLiteral("  |  "));
 }
 
 static QString downloadCover(const SystemInfo &info, const QString &title)
@@ -821,10 +821,10 @@ void LibretroMetadataProgressDialog::onMetadataProgress(const QString &title, co
                                                         int totalGames, int filePercent,
                                                         int overallPercent)
 {
-    m_status->setText(QStringLiteral("%1  —  %2").arg(title, stage));
+    m_status->setText(QStringLiteral("%1  -  %2").arg(title, stage));
     m_path->setText(QDir::toNativeSeparators(path));
-    m_fileCaption->setText(QStringLiteral("Current game — %1%").arg(filePercent));
-    m_overallCaption->setText(QStringLiteral("Overall metadata — game %1 of %2").arg(currentIndex).arg(totalGames));
+    m_fileCaption->setText(QStringLiteral("Current game - %1%").arg(filePercent));
+    m_overallCaption->setText(QStringLiteral("Overall metadata - game %1 of %2").arg(currentIndex).arg(totalGames));
     m_fileProgress->setValue(qBound(0, filePercent, 100));
     m_overallProgress->setValue(qBound(0, overallPercent, 100));
 }
@@ -844,7 +844,7 @@ void LibretroMetadataProgressDialog::onMetadataSummary(int matchedCount, int fal
     } else if (matchedCount == 0 && fallbackCount == 0 && notFoundCount == 0) {
         m_status->setText(QStringLiteral("Game metadata is already up to date."));
     } else {
-        m_status->setText(QStringLiteral("Metadata complete — Libretro: %1, fallback: %2, no match: %3")
+        m_status->setText(QStringLiteral("Metadata complete - Libretro: %1, fallback: %2, no match: %3")
                           .arg(matchedCount).arg(fallbackCount).arg(notFoundCount));
     }
     m_path->clear();
