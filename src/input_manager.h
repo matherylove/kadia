@@ -15,7 +15,9 @@ public:
         Left,
         Right,
         Accept,
-        Back
+        Back,
+        ToggleGallery,
+        CycleSort
     };
 
     explicit InputManager(QObject *parent = 0);

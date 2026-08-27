@@ -1,5 +1,6 @@
 #include "ui_model.h"
 #include "rom_scanner.h"
+#include "game_stats.h"
 #include <QDir>
 #include <QFileInfo>
 #include <algorithm>
@@ -29,6 +30,11 @@ int &gameLibraryRevisionStorage()
 {
     static int revision = 0;
     return revision;
+}
+KadiaGameSort &gameSortStorage()
+{
+    static KadiaGameSort sort = SortAlphabetical;
+    return sort;
 }
 
 static bool gameMatchesFilter(const KadiaGameInfo &game, const QString &rawFilter)
@@ -124,6 +130,13 @@ static bool buildKadiaGameFromRecord(const RomCatalogRecord &record, KadiaGameIn
     out->system = system;
     out->path = record.path;
     out->coverPath = record.coverArtPath;
+    out->releaseYear = record.releaseYear;
+    GameStats::ensureAdded(record.path, record.dateAdded);
+    const KadiaGameStats stats = GameStats::load(record.path);
+    out->dateAdded = stats.dateAdded.isValid() ? stats.dateAdded : record.dateAdded;
+    out->lastPlayed = stats.lastPlayed;
+    out->playSeconds = stats.playSeconds;
+    out->playCount = stats.playCount;
     return true;
 }
 
@@ -189,6 +202,32 @@ void refreshKadiaGameLibrary()
 void setKadiaActiveGameFilter(const QString &filter)
 {
     activeGameFilterStorage() = filter;
+}
+
+void setKadiaGameSort(KadiaGameSort sort)
+{
+    if (sort < SortAlphabetical || sort > SortDateAdded)
+        sort = SortAlphabetical;
+    if (gameSortStorage() != sort) {
+        gameSortStorage() = sort;
+        ++gameLibraryRevisionStorage();
+    }
+}
+
+KadiaGameSort kadiaGameSort()
+{
+    return gameSortStorage();
+}
+
+QString kadiaGameSortLabel()
+{
+    switch (gameSortStorage()) {
+    case SortReleaseDate: return QStringLiteral("Release date");
+    case SortPlayedState: return QStringLiteral("Played / unplayed");
+    case SortPlayTime: return QStringLiteral("Hours played");
+    case SortDateAdded: return QStringLiteral("Date added");
+    default: return QStringLiteral("Alphabetical");
+    }
 }
 
 
@@ -525,6 +564,22 @@ const QVector<KadiaGameInfo> &kadiaGames()
             if (gameMatchesFilter(all.at(i), filter))
                 filteredGames.push_back(all.at(i));
         }
+        const KadiaGameSort sortMode = gameSortStorage();
+        std::sort(filteredGames.begin(), filteredGames.end(), [sortMode](const KadiaGameInfo &a, const KadiaGameInfo &b) {
+            if (sortMode == SortReleaseDate) {
+                const int ay = a.releaseYear.toInt(); const int by = b.releaseYear.toInt();
+                if (ay != by) return ay > by;
+            } else if (sortMode == SortPlayedState) {
+                const bool ap = a.playCount > 0; const bool bp = b.playCount > 0;
+                if (ap != bp) return !ap;
+                if (a.playCount != b.playCount) return a.playCount < b.playCount;
+            } else if (sortMode == SortPlayTime) {
+                if (a.playSeconds != b.playSeconds) return a.playSeconds > b.playSeconds;
+            } else if (sortMode == SortDateAdded) {
+                if (a.dateAdded != b.dateAdded) return a.dateAdded > b.dateAdded;
+            }
+            return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+        });
         lastRevision = revision;
         lastFilter = filter;
     }

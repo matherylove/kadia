@@ -477,6 +477,7 @@ static void invalidateMetadataLookupInCurrentGroup(QSettings &s, bool clearExter
         s.remove(QStringLiteral("coverArtPath"));
         s.remove(QStringLiteral("metadataSource"));
         s.remove(QStringLiteral("metadataUpdatedAt"));
+        s.remove(QStringLiteral("releaseYear"));
     }
 }
 
@@ -497,6 +498,8 @@ void saveClassification(const QString &path, const QString &system)
     QSettings s(catalogPath(), QSettings::IniFormat);
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
     s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
+    if (!s.value(QStringLiteral("dateAdded")).toDateTime().isValid())
+        s.setValue(QStringLiteral("dateAdded"), QDateTime::currentDateTimeUtc());
     s.setValue(QStringLiteral("classification"), system);
     s.setValue(QStringLiteral("classificationSource"), QStringLiteral("manual"));
     invalidateMetadataLookupInCurrentGroup(s, false);
@@ -513,6 +516,8 @@ void saveInspectionMetadata(const QString &path, const QString &detectedSystem,
     QSettings s(catalogPath(), QSettings::IniFormat);
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
     s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
+    if (!s.value(QStringLiteral("dateAdded")).toDateTime().isValid())
+        s.setValue(QStringLiteral("dateAdded"), QDateTime::currentDateTimeUtc());
     s.setValue(QStringLiteral("detectedSystem"), detectedSystem.simplified());
     s.setValue(QStringLiteral("internalTitle"), title.simplified());
     s.setValue(QStringLiteral("internalId"), internalIdValue.simplified());
@@ -529,6 +534,8 @@ void saveDetectedRom(const QString &path, const QString &system, const QString &
     QSettings s(catalogPath(), QSettings::IniFormat);
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
     s.setValue(QStringLiteral("path"), QDir::toNativeSeparators(path));
+    if (!s.value(QStringLiteral("dateAdded")).toDateTime().isValid())
+        s.setValue(QStringLiteral("dateAdded"), QDateTime::currentDateTimeUtc());
     s.setValue(QStringLiteral("classification"), system);
     s.setValue(QStringLiteral("classificationSource"), QStringLiteral("automatic"));
     s.setValue(QStringLiteral("detectedSystem"), system);
@@ -619,7 +626,7 @@ bool hasScreenScraperMetadata(const QString &path)
 
 void saveExternalMetadata(const QString &path, const QString &title,
                           const QString &descriptionValue, const QString &coverPath,
-                          const QString &source)
+                          const QString &source, const QString &releaseYear)
 {
     QSettings s(catalogPath(), QSettings::IniFormat);
     s.beginGroup(QStringLiteral("files/%1").arg(keyForPath(path)));
@@ -631,6 +638,8 @@ void saveExternalMetadata(const QString &path, const QString &title,
         s.setValue(QStringLiteral("coverArtPath"), QDir::toNativeSeparators(coverPath));
     if (!source.trimmed().isEmpty())
         s.setValue(QStringLiteral("metadataSource"), source.trimmed());
+    if (!releaseYear.trimmed().isEmpty())
+        s.setValue(QStringLiteral("releaseYear"), releaseYear.trimmed());
     s.setValue(QStringLiteral("metadataUpdatedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
     s.endGroup();
     s.sync();
@@ -640,7 +649,7 @@ void saveScreenScraperMetadata(const QString &path, const QString &title,
                                const QString &descriptionValue, const QString &coverPath,
                                const QString &source)
 {
-    saveExternalMetadata(path, title, descriptionValue, coverPath, source);
+    saveExternalMetadata(path, title, descriptionValue, coverPath, source, QString());
 }
 
 bool metadataLookupCurrent(const RomCatalogRecord &record)
@@ -792,6 +801,8 @@ static void readCatalogRecordFromCurrentGroup(QSettings &s, RomCatalogRecord *re
     record->coverArtPath = QDir::fromNativeSeparators(s.value(QStringLiteral("coverArtPath")).toString());
     record->metadataSource = s.value(QStringLiteral("metadataSource")).toString().simplified();
     record->metadataLookupState = s.value(QStringLiteral("metadataLookupState")).toString().simplified();
+    record->releaseYear = s.value(QStringLiteral("releaseYear")).toString().simplified();
+    record->dateAdded = s.value(QStringLiteral("dateAdded")).toDateTime();
     record->metadataLookupVersion = s.value(QStringLiteral("metadataLookupVersion"), 0).toInt();
     const QDateTime metadataCheckedAt = s.value(QStringLiteral("metadataLookupCheckedAt")).toDateTime();
     record->metadataLookupCheckedMs = metadataCheckedAt.isValid() ? metadataCheckedAt.toUTC().toMSecsSinceEpoch() : -1;

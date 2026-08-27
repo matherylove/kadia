@@ -1,5 +1,7 @@
 #include "kadia_scene.h"
 #include "ui_model.h"
+#include "game_stats.h"
+#include "kadia_settings.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -59,6 +61,10 @@ static qreal footerCenterY()
 {
     return canvasHeight() - 60.0;
 }
+static QRectF settingsButtonRect()
+{
+    return QRectF(canvasWidth() - kShellRight - 270.0, kShellTop + 5.0, 82.0, 32.0);
+}
 
 static QRectF adjustedRect(const QRectF &r, qreal dx1, qreal dy1, qreal dx2, qreal dy2)
 {
@@ -102,6 +108,52 @@ static const QPixmap *coverPixmapForPath(const QString &path)
     return &entry.pixmap;
 }
 
+
+static QHash<QString, QImage> &brandIconCache()
+{
+    static QHash<QString, QImage> cache;
+    return cache;
+}
+
+static const QImage *rawArgbIcon(const QString &resource)
+{
+    if (resource.isEmpty()) return 0;
+    QHash<QString, QImage> &cache = brandIconCache();
+    if (!cache.contains(resource)) {
+        QImage image;
+        QFile file(resource);
+        if (file.open(QIODevice::ReadOnly)) {
+            const QByteArray raw = file.readAll();
+            if (raw.size() >= 8) {
+                const uchar *bytes = reinterpret_cast<const uchar *>(raw.constData());
+                const quint32 w = qFromLittleEndian<quint32>(bytes);
+                const quint32 h = qFromLittleEndian<quint32>(bytes + 4);
+                const qint64 required = 8 + static_cast<qint64>(w) * static_cast<qint64>(h) * 4;
+                if (w > 0 && h > 0 && required <= raw.size()) {
+                    QImage wrapped(bytes + 8, static_cast<int>(w), static_cast<int>(h),
+                                   static_cast<int>(w) * 4, QImage::Format_ARGB32_Premultiplied);
+                    image = wrapped.copy();
+                }
+            }
+        }
+        cache.insert(resource, image);
+    }
+    const QImage &image = cache[resource];
+    return image.isNull() ? 0 : &image;
+}
+
+static QString consoleBrandResource(const QString &section, const QString &label)
+{
+    const QString key = (section + QLatin1Char(' ') + label).toLower();
+    if (key.contains(QStringLiteral("ps vita"))) return QStringLiteral(":/assets/console_icons/psvita.argb");
+    if (key.contains(QStringLiteral("psp")) || key.contains(QStringLiteral("portable"))) return QStringLiteral(":/assets/console_icons/psp.argb");
+    if (key.contains(QStringLiteral("playstation 3"))) return QStringLiteral(":/assets/console_icons/playstation3.argb");
+    if (key.contains(QStringLiteral("playstation 2"))) return QStringLiteral(":/assets/console_icons/playstation2.argb");
+    if (key.contains(QStringLiteral("playstation"))) return QStringLiteral(":/assets/console_icons/playstation.argb");
+    if (key.contains(QStringLiteral("sega")) || key.contains(QStringLiteral("game gear"))) return QStringLiteral(":/assets/console_icons/sega.argb");
+    if (key.contains(QStringLiteral("atari")) || key.contains(QStringLiteral("lynx"))) return QStringLiteral(":/assets/console_icons/atari.argb");
+    return QString();
+}
 static qreal coverAspectForGame(const KadiaGameInfo &game)
 {
     const QPixmap *pm = coverPixmapForPath(game.coverPath);
@@ -122,6 +174,7 @@ KadiaScene::KadiaScene()
     , m_game(0)
     , m_previousGame(0)
     , m_library(false)
+    , m_gallery(false)
     , m_controllerConnected(false)
     , m_fontMode(0)
     , m_libraryTitle(QStringLiteral("Super Nintendo"))
@@ -131,7 +184,9 @@ KadiaScene::KadiaScene()
     , m_tileChangeAge(1.0)
     , m_gameChangeAge(1.0)
     , m_categoryChangeAge(1.0)
+    , m_galleryBlend(0.0)
 {
+    setKadiaGameSort(static_cast<KadiaGameSort>(KadiaSettings::defaultGallerySort()));
     const QStringList families = QFontDatabase().families();
     if (families.contains(QStringLiteral("Segoe UI")))
         m_uiFontFamily = QStringLiteral("Segoe UI");
@@ -209,6 +264,10 @@ void KadiaScene::update(double dtSeconds)
     m_tileChangeAge += dtSeconds;
     m_gameChangeAge += dtSeconds;
     m_categoryChangeAge += dtSeconds;
+    const double galleryTarget = m_gallery ? 1.0 : 0.0;
+    const double speed = qMin(1.0, dtSeconds * 7.5);
+    m_galleryBlend += (galleryTarget - m_galleryBlend) * speed;
+    if (qAbs(m_galleryBlend - galleryTarget) < 0.002) m_galleryBlend = galleryTarget;
     updateStars(dtSeconds);
 }
 
@@ -230,16 +289,58 @@ void KadiaScene::render(QImage &target)
 void KadiaScene::handle(Action action)
 {
     if (m_library) {
-        if (action == MoveLeft || action == MoveRight) {
-            const int count = kadiaGames().size();
-            if (count <= 0)
-                return;
-            m_previousGame = m_game;
-            m_game = (m_game + (action == MoveLeft ? -1 : 1) + count) % count;
+        const int count = kadiaGames().size();
+        if (action == ToggleGallery) {
+            m_gallery = !m_gallery;
             m_gameChangeAge = 0.0;
-        } else if (action == Back) {
+            return;
+        }
+        if (action == CycleSort) {
+            setKadiaGameSort(static_cast<KadiaGameSort>((static_cast<int>(kadiaGameSort()) + 1) % 5));
+            m_game = 0;
+            m_previousGame = 0;
+            m_gameChangeAge = 0.0;
+            return;
+        }
+        if (action == Back) {
+            if (m_gallery) {
+                m_gallery = false;
+                return;
+            }
             m_library = false;
             m_tileChangeAge = 1.0;
+            return;
+        }
+        if (action == Accept) {
+            if (count > 0)
+                m_pendingCommand = LaunchSelectedGame;
+            return;
+        }
+        if (count <= 0)
+            return;
+
+        int delta = 0;
+        if (m_gallery) {
+            const int columns = galleryColumns();
+            if (action == MoveLeft) delta = -1;
+            else if (action == MoveRight) delta = 1;
+            else if (action == MoveUp) delta = -columns;
+            else if (action == MoveDown) delta = columns;
+        } else {
+            if (action == MoveLeft) delta = -1;
+            else if (action == MoveRight) delta = 1;
+            else if (action == MoveUp) {
+                setKadiaGameSort(static_cast<KadiaGameSort>((static_cast<int>(kadiaGameSort()) + 4) % 5));
+                m_game = 0; m_previousGame = 0; return;
+            } else if (action == MoveDown) {
+                setKadiaGameSort(static_cast<KadiaGameSort>((static_cast<int>(kadiaGameSort()) + 1) % 5));
+                m_game = 0; m_previousGame = 0; return;
+            }
+        }
+        if (delta != 0) {
+            m_previousGame = m_game;
+            m_game = qBound(0, m_game + delta, count - 1);
+            m_gameChangeAge = 0.0;
         }
         return;
     }
@@ -247,6 +348,31 @@ void KadiaScene::handle(Action action)
     const QVector<KadiaSectionInfo> &sections = kadiaSections();
     if (sections.isEmpty())
         return;
+
+    if (action == ToggleGallery) {
+        const QString section = sections[m_category].name;
+        const bool browseSection = section == QStringLiteral("Home") || section == QStringLiteral("Games") ||
+                                   section == QStringLiteral("Consoles") || section == QStringLiteral("Handhelds") ||
+                                   section == QStringLiteral("Arcade") || section == QStringLiteral("PC Games") ||
+                                   section == QStringLiteral("Collections") || section == QStringLiteral("Recent") ||
+                                   section == QStringLiteral("Favorites") || section == QStringLiteral("Achievements");
+        if (browseSection) {
+            QString filter = selectedTileName();
+            if (filter.isEmpty() || section == QStringLiteral("Home")) filter = QStringLiteral("All Games");
+            m_libraryTitle = filter;
+            setKadiaActiveGameFilter(filter);
+            m_game = m_previousGame = 0;
+            m_library = true;
+            m_gallery = true;
+            m_gameChangeAge = 1.0;
+        }
+        return;
+    }
+
+    if (action == CycleSort) {
+        setKadiaGameSort(static_cast<KadiaGameSort>((static_cast<int>(kadiaGameSort()) + 1) % 5));
+        return;
+    }
 
     if (action == MoveUp || action == MoveDown) {
         const int delta = action == MoveUp ? -1 : 1;
@@ -277,32 +403,44 @@ void KadiaScene::handle(Action action)
             m_pendingCommand = OpenBackgroundSettings;
             return;
         }
-        const bool gameBrowse = section == QStringLiteral("Games") ||
-                                section == QStringLiteral("Consoles") ||
-                                section == QStringLiteral("Handhelds") ||
-                                section == QStringLiteral("Arcade") ||
-                                section == QStringLiteral("PC Games") ||
-                                section == QStringLiteral("Collections") ||
-                                section == QStringLiteral("Recent") ||
-                                section == QStringLiteral("Favorites") ||
+        if ((section == QStringLiteral("System Settings") && selected == QStringLiteral("Information")) ||
+            (section == QStringLiteral("Tasks") && selected == QStringLiteral("Settings"))) {
+            m_pendingCommand = OpenKadiaSettings;
+            return;
+        }
+        if (section == QStringLiteral("Games") && selected == QStringLiteral("Sort")) {
+            handle(CycleSort); return;
+        }
+        if (section == QStringLiteral("Games") && selected == QStringLiteral("View Style")) {
+            m_libraryTitle = QStringLiteral("All Games"); setKadiaActiveGameFilter(m_libraryTitle);
+            m_game = m_previousGame = 0; m_library = true; m_gallery = true; m_gameChangeAge = 1.0; return;
+        }
+        if (section == QStringLiteral("Games") && selected == QStringLiteral("Random Game")) {
+            m_libraryTitle = QStringLiteral("All Games"); setKadiaActiveGameFilter(m_libraryTitle);
+            const int count = kadiaGames().size();
+            m_game = count > 0 ? static_cast<int>(m_rng() % static_cast<unsigned int>(count)) : 0;
+            m_previousGame = m_game; m_library = true; m_gallery = false; m_gameChangeAge = 1.0; return;
+        }
+        const bool gameBrowse = section == QStringLiteral("Games") || section == QStringLiteral("Consoles") ||
+                                section == QStringLiteral("Handhelds") || section == QStringLiteral("Arcade") ||
+                                section == QStringLiteral("PC Games") || section == QStringLiteral("Collections") ||
+                                section == QStringLiteral("Recent") || section == QStringLiteral("Favorites") ||
                                 section == QStringLiteral("Achievements");
         const bool homeGame = section == QStringLiteral("Home") &&
-                              (selected == QStringLiteral("Continue") ||
-                               selected == QStringLiteral("All Games") ||
-                               selected == QStringLiteral("Favorites") ||
-                               selected == QStringLiteral("Search"));
+                              (selected == QStringLiteral("Continue") || selected == QStringLiteral("All Games") ||
+                               selected == QStringLiteral("Favorites") || selected == QStringLiteral("Search"));
         if (gameBrowse || homeGame) {
-            m_libraryTitle = selected == QStringLiteral("Systems")
-                           ? QStringLiteral("Game Library") : selected;
+            m_libraryTitle = selected == QStringLiteral("Systems") ? QStringLiteral("Game Library") : selected;
             setKadiaActiveGameFilter(m_libraryTitle);
-            m_game = 0;
-            m_previousGame = 0;
+            m_game = m_previousGame = 0;
             m_library = true;
+            m_gallery = false;
             m_gameChangeAge = 1.0;
+        } else {
+            m_pendingCommand = RunTileAction;
         }
     }
 }
-
 void KadiaScene::cycleWordmarkFont()
 {
     m_fontMode = (m_fontMode + 1) % 3;
@@ -353,12 +491,46 @@ QString KadiaScene::selectedTileName() const
     return sections[m_category].tiles[m_tile].label;
 }
 
+QString KadiaScene::selectedGamePath() const
+{
+    const QVector<KadiaGameInfo> &games = kadiaGames();
+    if (m_game < 0 || m_game >= games.size()) return QString();
+    return games.at(m_game).path;
+}
+
+QString KadiaScene::selectedGameSystem() const
+{
+    const QVector<KadiaGameInfo> &games = kadiaGames();
+    if (m_game < 0 || m_game >= games.size()) return QString();
+    return games.at(m_game).system;
+}
+
+bool KadiaScene::galleryMode() const
+{
+    return m_gallery;
+}
+
 bool KadiaScene::hoverAt(const QPointF &point)
 {
     if (m_library) {
         const QVector<KadiaGameInfo> &games = kadiaGames();
         if (games.isEmpty())
             return false;
+
+        if (m_gallery || m_galleryBlend > 0.45) {
+            for (int i = 0; i < games.size(); ++i) {
+                const QRectF card = galleryCardRect(i, games.size());
+                if (card.isValid() && card.contains(point)) {
+                    if (m_game != i) {
+                        m_previousGame = m_game;
+                        m_game = i;
+                        m_gameChangeAge = 0.0;
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
 
         const qreal y = kHubTop + 310.0;
         const qreal gap = 15.0;
@@ -415,6 +587,9 @@ bool KadiaScene::hoverAt(const QPointF &point)
         return false;
     }
 
+    if (settingsButtonRect().contains(point))
+        return true;
+
     const QVector<KadiaSectionInfo> &sections = kadiaSections();
     if (sections.isEmpty())
         return false;
@@ -465,6 +640,10 @@ bool KadiaScene::hoverAt(const QPointF &point)
 
 bool KadiaScene::clickAt(const QPointF &point)
 {
+    if (!m_library && settingsButtonRect().contains(point)) {
+        m_pendingCommand = OpenKadiaSettings;
+        return true;
+    }
     if (!hoverAt(point))
         return false;
 
@@ -481,9 +660,11 @@ bool KadiaScene::clickAt(const QPointF &point)
 
 bool KadiaScene::doubleClickAt(const QPointF &point)
 {
-    // Single-click already activates top-level tiles after hover selection.
-    // Keep double-click accepted without firing the action twice.
-    return hoverAt(point);
+    if (!hoverAt(point))
+        return false;
+    if (m_library)
+        handle(Accept);
+    return true;
 }
 
 void KadiaScene::wheelAt(const QPointF &point, int delta)
@@ -492,7 +673,7 @@ void KadiaScene::wheelAt(const QPointF &point, int delta)
         return;
 
     if (m_library) {
-        handle(delta > 0 ? MoveLeft : MoveRight);
+        handle(delta > 0 ? (m_gallery ? MoveUp : MoveLeft) : (m_gallery ? MoveDown : MoveRight));
         return;
     }
 
@@ -833,8 +1014,13 @@ void KadiaScene::drawTopBar(QPainter &p)
     p.setFont(fontForPixelSize(12, QFont::Normal));
     p.setPen(QColor(255, 248, 231, 185));
     const QString timeText = QDateTime::currentDateTime().toString(QStringLiteral("h:mm AP"));
-    p.drawText(QRectF(canvasWidth() - kShellRight - 150.0, kShellTop + 8.0, 150.0, 28.0),
-               Qt::AlignRight | Qt::AlignVCenter, timeText);
+    if (KadiaSettings::showClock())
+        p.drawText(QRectF(canvasWidth() - kShellRight - 150.0, kShellTop + 8.0, 150.0, 28.0),
+                   Qt::AlignRight | Qt::AlignVCenter, timeText);
+    const QRectF sr = settingsButtonRect();
+    p.setPen(QColor(255, 248, 231, 150));
+    p.setFont(fontForPixelSize(11, QFont::Normal));
+    p.drawText(sr, Qt::AlignCenter, QStringLiteral("Settings"));
     p.restore();
 }
 
@@ -983,10 +1169,10 @@ void KadiaScene::drawLibrary(QPainter &p)
     drawTextShadow(p, QRectF(kHubLeft, railTop + 34.0, 500.0, 51.0),
                    Qt::AlignLeft | Qt::AlignVCenter, m_libraryTitle, latte(255));
 
-    p.setFont(fontForPixelSize(24, QFont::Light));
-    p.setPen(QColor(255, 248, 231, 88));
-    p.drawText(QRectF(kHubLeft, railTop + 90.0, 360.0, 34.0), Qt::AlignLeft | Qt::AlignVCenter,
-               QStringLiteral("All Games"));
+    p.setFont(fontForPixelSize(18, QFont::Light));
+    p.setPen(QColor(255, 248, 231, 118));
+    p.drawText(QRectF(kHubLeft, railTop + 90.0, 520.0, 34.0), Qt::AlignLeft | Qt::AlignVCenter,
+               QStringLiteral("%1 view  •  Sort: %2").arg(m_gallery ? QStringLiteral("Gallery") : QStringLiteral("Carousel"), kadiaGameSortLabel()));
     p.drawText(QRectF(kHubLeft, railTop + 124.0, 360.0, 34.0), Qt::AlignLeft | Qt::AlignVCenter,
                QStringLiteral("Favorites"));
     p.drawText(QRectF(kHubLeft, railTop + 158.0, 360.0, 34.0), Qt::AlignLeft | Qt::AlignVCenter,
@@ -1018,6 +1204,13 @@ void KadiaScene::drawLibrary(QPainter &p)
         m_previousGame = 0;
     }
 
+    if (m_galleryBlend > 0.001)
+        drawGallery(p, games, m_galleryBlend);
+    if (m_galleryBlend >= 0.995)
+        return;
+
+    p.save();
+    p.setOpacity(1.0 - m_galleryBlend);
     const qreal t = easeOutCubic(qMin<qreal>(1.0, m_gameChangeAge / 0.18));
 
     QVector<qreal> widths;
@@ -1072,7 +1265,77 @@ void KadiaScene::drawLibrary(QPainter &p)
     if (!games.isEmpty()) {
         const KadiaGameInfo &game = games[qBound(0, m_game, games.size() - 1)];
         const QRectF panel(panelX(), kHubTop + 302.0, kPanelTotalWidth, 204.0);
-        drawDescriptionPanel(p, panel, game.title, game.subtitle, game.description, true);
+        QString detail = game.description;
+        QStringList stats;
+        if (!game.releaseYear.isEmpty()) stats << QStringLiteral("Released %1").arg(game.releaseYear);
+        stats << GameStats::humanPlayTime(game.playSeconds);
+        if (game.dateAdded.isValid()) stats << QStringLiteral("Added %1").arg(game.dateAdded.date().toString(Qt::ISODate));
+        if (!stats.isEmpty()) detail = stats.join(QStringLiteral("  •  ")) + QStringLiteral("\n") + detail;
+        drawDescriptionPanel(p, panel, game.title, game.subtitle, detail, true);
+    }
+    p.restore();
+}
+
+int KadiaScene::galleryColumns() const
+{
+    const qreal available = qMax<qreal>(420.0, stripWidth());
+    return qBound(3, static_cast<int>(available / 150.0), 7);
+}
+
+QRectF KadiaScene::galleryCardRect(int index, int count) const
+{
+    if (index < 0 || index >= count) return QRectF();
+    const int columns = galleryColumns();
+    const qreal gap = 13.0;
+    const qreal areaW = stripWidth();
+    const qreal cardW = qMin<qreal>(150.0, (areaW - gap * (columns - 1)) / columns);
+    const qreal cardH = 176.0;
+    const int row = index / columns;
+    const int col = index % columns;
+    const int selectedRow = qMax(0, m_game / columns);
+    const int visibleRows = 2;
+    const int firstRow = qMax(0, selectedRow - (visibleRows - 1));
+    const qreal top = kHubTop + 292.0;
+    const qreal x = kStripX + col * (cardW + gap);
+    const qreal y = top + (row - firstRow) * (cardH + gap);
+    if (row < firstRow || row >= firstRow + visibleRows) return QRectF();
+    return QRectF(x, y, cardW, cardH);
+}
+
+void KadiaScene::drawGallery(QPainter &p, const QVector<KadiaGameInfo> &games, qreal opacity)
+{
+    if (games.isEmpty() || opacity <= 0.0) return;
+    p.save();
+    p.setOpacity(qBound<qreal>(0.0, opacity, 1.0));
+    p.setClipRect(QRectF(kStripX, kHubTop + 276.0, stripWidth(), 390.0));
+    const qreal transition = easeOutCubic(qMin<qreal>(1.0, m_gameChangeAge / 0.16));
+    for (int i = 0; i < games.size(); ++i) {
+        QRectF card = galleryCardRect(i, games.size());
+        if (!card.isValid()) continue;
+        qreal sel = i == m_game ? transition : (i == m_previousGame ? 1.0 - transition : 0.0);
+        if (m_game == m_previousGame) sel = i == m_game ? 1.0 : 0.0;
+        const qreal zoom = 1.0 + 0.055 * sel;
+        const QPointF c = card.center();
+        card = QRectF(c.x() - card.width() * zoom * 0.5,
+                      c.y() - card.height() * zoom * 0.5 - 5.0 * sel,
+                      card.width() * zoom, card.height() * zoom);
+        drawGameCard(p, card, static_cast<float>(sel), i);
+    }
+    p.restore();
+
+    if (m_game >= 0 && m_game < games.size()) {
+        const KadiaGameInfo &game = games.at(m_game);
+        const QRectF panel(panelX(), kHubTop + 292.0, kPanelTotalWidth, 218.0);
+        QStringList stats;
+        if (!game.releaseYear.isEmpty()) stats << QStringLiteral("Released %1").arg(game.releaseYear);
+        stats << GameStats::humanPlayTime(game.playSeconds);
+        if (game.lastPlayed.isValid()) stats << QStringLiteral("Last played %1").arg(game.lastPlayed.date().toString(Qt::ISODate));
+        QString detail = stats.join(QStringLiteral("  •  "));
+        if (!detail.isEmpty()) detail += QStringLiteral("\n");
+        detail += game.description;
+        p.save(); p.setOpacity(opacity);
+        drawDescriptionPanel(p, panel, game.title, game.subtitle, detail, true);
+        p.restore();
     }
 }
 
@@ -1243,6 +1506,21 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
         sectionKey = sections[m_category].name.toLower();
     const QString key = (sectionKey + QStringLiteral(" ") + label + QStringLiteral(" ") + icon).toLower();
     const uint signature = qHash(sectionKey + QStringLiteral("|") + label + QStringLiteral("|") + icon);
+
+    const QString brandResource = consoleBrandResource(sectionKey, label);
+    if (!brandResource.isEmpty()) {
+        const QImage *brand = rawArgbIcon(brandResource);
+        if (brand && !brand->isNull()) {
+            const qreal side = qMin(rect.width() * 0.52, rect.height() * 0.62) * (1.0 + 0.08 * selection);
+            QRectF target(center.x() - side * 0.5, center.y() - side * 0.5, side, side);
+            p.save();
+            p.setOpacity(0.82 + 0.18 * selection);
+            p.drawImage(target, *brand, QRectF(brand->rect()));
+            p.restore();
+            p.restore();
+            return;
+        }
+    }
 
     auto has = [&](const char *needle) -> bool {
         return key.contains(QString::fromLatin1(needle));

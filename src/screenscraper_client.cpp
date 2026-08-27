@@ -407,6 +407,21 @@ static ScreenScraperMetadata parseMetadata(const QByteArray &data)
                                                        << QStringLiteral("description")
                                                        << QStringLiteral("resume"));
 
+    QString releaseDate = findLocalizedStringRecursive(jeu, QStringList()
+                                                       << QStringLiteral("datesortie")
+                                                       << QStringLiteral("release_date")
+                                                       << QStringLiteral("releasedate"));
+    QString releaseYear;
+    for (int i = 0; i + 3 < releaseDate.size(); ++i) {
+        const QString candidate = releaseDate.mid(i, 4);
+        bool ok = false;
+        const int year = candidate.toInt(&ok);
+        if (ok && year >= 1970 && year <= 2100) {
+            releaseYear = candidate;
+            break;
+        }
+    }
+
     const QString coverUrl = findCoverUrlRecursive(jeu);
     if (title.isEmpty() && description.isEmpty() && coverUrl.isEmpty())
         return out;
@@ -414,6 +429,7 @@ static ScreenScraperMetadata parseMetadata(const QByteArray &data)
     out.success = true;
     out.title = title.simplified();
     out.description = description.simplified();
+    out.releaseYear = releaseYear;
     out.source = QStringLiteral("ScreenScraper");
 
     if (!coverUrl.isEmpty()) {

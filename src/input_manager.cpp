@@ -20,8 +20,10 @@ const WORD KADIA_XINPUT_DPAD_UP = 0x0001;
 const WORD KADIA_XINPUT_DPAD_DOWN = 0x0002;
 const WORD KADIA_XINPUT_DPAD_LEFT = 0x0004;
 const WORD KADIA_XINPUT_DPAD_RIGHT = 0x0008;
+const WORD KADIA_XINPUT_BACK = 0x0020;
 const WORD KADIA_XINPUT_A = 0x1000;
 const WORD KADIA_XINPUT_B = 0x2000;
+const WORD KADIA_XINPUT_Y = 0x8000;
 }
 #endif
 
@@ -102,6 +104,8 @@ InputManager::Action InputManager::poll()
     if (edges & KADIA_XINPUT_DPAD_RIGHT) return Right;
     if (edges & KADIA_XINPUT_A) return Accept;
     if (edges & KADIA_XINPUT_B) return Back;
+    if (edges & KADIA_XINPUT_BACK) return ToggleGallery;
+    if (edges & KADIA_XINPUT_Y) return CycleSort;
     return None;
 #else
     return None;

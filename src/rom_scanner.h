@@ -2,6 +2,7 @@
 
 #include <QAtomicInt>
 #include <QDialog>
+#include <QDateTime>
 #include <QQueue>
 #include <QString>
 #include <QStringList>
@@ -31,6 +32,8 @@ struct RomCatalogRecord
     QString coverArtPath;
     QString metadataSource;
     QString metadataLookupState;
+    QString releaseYear;
+    QDateTime dateAdded;
     int metadataLookupVersion;
     qint64 metadataLookupCheckedMs;
     bool automaticDetection;
@@ -65,7 +68,7 @@ namespace RomCatalog
                                    const QString &source);
     void saveExternalMetadata(const QString &path, const QString &title,
                               const QString &description, const QString &coverPath,
-                              const QString &source);
+                              const QString &source, const QString &releaseYear = QString());
     bool metadataLookupCurrent(const QString &path);
     bool metadataLookupCurrent(const RomCatalogRecord &record);
     void markMetadataLookup(const QString &path, const QString &state);

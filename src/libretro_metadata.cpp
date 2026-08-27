@@ -678,7 +678,7 @@ void LibretroMetadataWorker::run()
                                                                       << QFileInfo(record.path).completeBaseName());
                     RomCatalog::saveExternalMetadata(record.path, title,
                                                      metadataDescription(*entry), cover,
-                                                     QStringLiteral("Libretro"));
+                                                     QStringLiteral("Libretro"), entry->releaseYear);
                     RomCatalog::markMetadataLookup(record.path, QStringLiteral("matched"));
                     ++matchedCount;
                     matched = true;
@@ -699,7 +699,8 @@ void LibretroMetadataWorker::run()
                                                                                   record.internalId);
             if (meta.success) {
                 RomCatalog::saveExternalMetadata(record.path, meta.title, meta.description,
-                                                 meta.coverPath, QStringLiteral("ScreenScraper"));
+                                                 meta.coverPath, QStringLiteral("ScreenScraper"),
+                                                 meta.releaseYear);
                 RomCatalog::markMetadataLookup(record.path, QStringLiteral("matched"));
                 ++fallbackCount;
                 matched = true;

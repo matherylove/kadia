@@ -9,6 +9,7 @@
 #include <QString>
 #include <QVector>
 #include <random>
+#include "ui_model.h"
 
 class QPainter;
 
@@ -21,12 +22,17 @@ public:
         MoveLeft,
         MoveRight,
         Accept,
-        Back
+        Back,
+        ToggleGallery,
+        CycleSort
     };
 
     enum Command {
         NoCommand,
-        OpenBackgroundSettings
+        OpenBackgroundSettings,
+        OpenKadiaSettings,
+        LaunchSelectedGame,
+        RunTileAction
     };
 
     KadiaScene();
@@ -46,6 +52,9 @@ public:
     bool inLibrary() const;
     QString selectedSectionName() const;
     QString selectedTileName() const;
+    QString selectedGamePath() const;
+    QString selectedGameSystem() const;
+    bool galleryMode() const;
 
     // Native mouse support. Coordinates are client pixels because the scene
     // renders at the monitor's actual resolution (no 720p intermediate).
@@ -94,6 +103,9 @@ private:
                               const QString &title, const QString &sub,
                               const QString &description, bool withPlayHint = false);
     void drawGameCard(QPainter &p, const QRectF &rect, float selection, int index);
+    void drawGallery(QPainter &p, const QVector<KadiaGameInfo> &games, qreal opacity);
+    QRectF galleryCardRect(int index, int count) const;
+    int galleryColumns() const;
     void drawGlassPanel(QPainter &p, const QRectF &rect, qreal radius = 8.0);
     void drawMediaControls(QPainter &p, qreal right, qreal centerY);
     void drawControllerHints(QPainter &p, qreal x, qreal centerY);
@@ -124,6 +136,7 @@ private:
     int m_game;
     int m_previousGame;
     bool m_library;
+    bool m_gallery;
     bool m_controllerConnected;
     int m_fontMode;
     QString m_libraryTitle;
@@ -134,4 +147,5 @@ private:
     double m_tileChangeAge;
     double m_gameChangeAge;
     double m_categoryChangeAge;
+    double m_galleryBlend;
 };

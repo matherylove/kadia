@@ -2,5 +2,12 @@
   <qresource prefix="/assets">
     <file alias="kadia_logo.argb">assets/kadia_logo.argb</file>
     <file alias="kadia_logo.png">assets/kadia_logo.png</file>
+    <file alias="console_icons/playstation.argb">assets/console_icons/playstation.argb</file>
+    <file alias="console_icons/playstation2.argb">assets/console_icons/playstation2.argb</file>
+    <file alias="console_icons/playstation3.argb">assets/console_icons/playstation3.argb</file>
+    <file alias="console_icons/psp.argb">assets/console_icons/psp.argb</file>
+    <file alias="console_icons/psvita.argb">assets/console_icons/psvita.argb</file>
+    <file alias="console_icons/sega.argb">assets/console_icons/sega.argb</file>
+    <file alias="console_icons/atari.argb">assets/console_icons/atari.argb</file>
   </qresource>
 </RCC>

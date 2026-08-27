@@ -55,7 +55,10 @@ SOURCES += \
     src/rom_header_detector.cpp \
     src/libretro_metadata.cpp \
     src/screenscraper_client.cpp \
-    src/ui_model.cpp
+    src/ui_model.cpp \
+    src/game_stats.cpp \
+    src/emulator_manager.cpp \
+    src/kadia_settings.cpp
 
 HEADERS += \
     src/kadia_window.h \
@@ -71,7 +74,10 @@ HEADERS += \
     src/rom_header_detector.h \
     src/libretro_metadata.h \
     src/screenscraper_client.h \
-    src/ui_model.h
+    src/ui_model.h \
+    src/game_stats.h \
+    src/emulator_manager.h \
+    src/kadia_settings.h
 
 RESOURCES += resources.qrc
 win32:RC_FILE = kadia.rc

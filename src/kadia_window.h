@@ -7,6 +7,7 @@
 #include <QRect>
 #include <QQueue>
 #include <QPair>
+#include <QDateTime>
 
 #include "d3d9_renderer.h"
 #include "input_manager.h"
@@ -14,6 +15,7 @@
 
 class QMouseEvent;
 class QWheelEvent;
+class QEvent;
 class RomScanner;
 class RomScanProgressDialog;
 class LibretroMetadataWorker;
@@ -42,6 +44,7 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) Q_DECL_OVERRIDE;
     void wheelEvent(QWheelEvent *event) Q_DECL_OVERRIDE;
     void closeEvent(QCloseEvent *event) Q_DECL_OVERRIDE;
+    void changeEvent(QEvent *event) Q_DECL_OVERRIDE;
 
 private slots:
     void frameTick();
@@ -83,4 +86,6 @@ private:
     QQueue<PendingRom> m_romQueue;
     bool m_romDialogActive;
     bool m_romScanCancelled;
+    QString m_activeGamePath;
+    QDateTime m_activeGameStarted;
 };

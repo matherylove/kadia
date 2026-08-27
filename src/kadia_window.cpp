@@ -4,12 +4,22 @@
 #include "libretro_metadata.h"
 #include "windspro_bootstrap.h"
 #include "ui_model.h"
+#include "kadia_settings.h"
+#include "emulator_manager.h"
+#include "game_stats.h"
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QEvent>
 #include <QDebug>
 #include <QDesktopWidget>
 #include <QKeyEvent>
+#include <QMessageBox>
+#include <QProcess>
+#include <QSettings>
+#include <QStandardPaths>
+#include <QFileInfo>
+#include <QDir>
 #include <QMouseEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
@@ -169,6 +179,12 @@ void KadiaWindow::keyPressEvent(QKeyEvent *event)
     case Qt::Key_Backspace:
         m_scene.handle(KadiaScene::Back);
         break;
+    case Qt::Key_Tab:
+        m_scene.handle(KadiaScene::ToggleGallery);
+        break;
+    case Qt::Key_S:
+        m_scene.handle(KadiaScene::CycleSort);
+        break;
     case Qt::Key_F:
         m_scene.cycleWordmarkFont();
         break;
@@ -204,6 +220,11 @@ void KadiaWindow::mousePressEvent(QMouseEvent *event)
     }
     if (event->button() == Qt::RightButton) {
         m_scene.handle(KadiaScene::Back);
+        event->accept();
+        return;
+    }
+    if (event->button() == Qt::MiddleButton) {
+        m_scene.handle(KadiaScene::ToggleGallery);
         event->accept();
         return;
     }
@@ -251,6 +272,20 @@ void KadiaWindow::closeEvent(QCloseEvent *event)
     m_timer.stop();
     m_renderer.shutdown();
     QWidget::closeEvent(event);
+}
+
+void KadiaWindow::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::ActivationChange && isActiveWindow() &&
+        !m_activeGamePath.isEmpty() && m_activeGameStarted.isValid()) {
+        const qint64 seconds = m_activeGameStarted.secsTo(QDateTime::currentDateTimeUtc());
+        if (seconds >= 5)
+            GameStats::addPlayTime(m_activeGamePath, seconds);
+        m_activeGamePath.clear();
+        m_activeGameStarted = QDateTime();
+        refreshKadiaGameLibrary();
+    }
 }
 
 void KadiaWindow::frameTick()
@@ -458,10 +493,134 @@ void KadiaWindow::showNextRomDialog()
 void KadiaWindow::processSceneCommands()
 {
     const KadiaScene::Command command = m_scene.takePendingCommand();
+    if (command == KadiaScene::NoCommand)
+        return;
+
     if (command == KadiaScene::OpenBackgroundSettings) {
         BackgroundSettingsDialog dialog(this);
         if (dialog.exec() == QDialog::Accepted)
             BackgroundSettings::applyToScene(&m_scene, dialog.preferences());
+        return;
+    }
+
+    if (command == KadiaScene::OpenKadiaSettings) {
+        KadiaSettingsDialog dialog(this);
+        if (dialog.exec() == QDialog::Accepted) {
+            setKadiaGameSort(static_cast<KadiaGameSort>(KadiaSettings::defaultGallerySort()));
+            refreshKadiaGameLibrary();
+            BackgroundSettings::applyToScene(&m_scene, BackgroundSettings::load());
+        }
+        return;
+    }
+
+    if (command == KadiaScene::LaunchSelectedGame) {
+        const QString path = m_scene.selectedGamePath();
+        if (EmulatorManager::launch(m_scene.selectedGameSystem(), path, this)) {
+            m_activeGamePath = path;
+            m_activeGameStarted = QDateTime::currentDateTimeUtc();
+            refreshKadiaGameLibrary();
+        }
+        return;
+    }
+
+    if (command != KadiaScene::RunTileAction)
+        return;
+
+    const QString section = m_scene.selectedSectionName();
+    const QString tile = m_scene.selectedTileName();
+
+    if (section == QStringLiteral("Power")) {
+        if (tile == QStringLiteral("Cancel")) return;
+        if (tile == QStringLiteral("Exit to Windows") || tile == QStringLiteral("Quit Frontend")) {
+            close();
+            return;
+        }
+#ifdef Q_OS_WIN
+        if (tile == QStringLiteral("Sleep")) {
+            QProcess::startDetached(QStringLiteral("rundll32.exe"), QStringList() << QStringLiteral("powrprof.dll,SetSuspendState") << QStringLiteral("0,1,0"));
+            return;
+        }
+        if (tile == QStringLiteral("Restart") || tile == QStringLiteral("Shut Down")) {
+            const QString verb = tile == QStringLiteral("Restart") ? QStringLiteral("restart") : QStringLiteral("shut down");
+            if (QMessageBox::question(this, QStringLiteral("Mathery Kadia!"),
+                                      QStringLiteral("Do you want to %1 Windows now?").arg(verb),
+                                      QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+                QProcess::startDetached(QStringLiteral("shutdown.exe"),
+                                        QStringList() << (tile == QStringLiteral("Restart") ? QStringLiteral("/r") : QStringLiteral("/s")) << QStringLiteral("/t") << QStringLiteral("0"));
+            }
+            return;
+        }
+#endif
+    }
+
+    if (section == QStringLiteral("Controllers")) {
+        QProcess::startDetached(QStringLiteral("control.exe"), QStringList() << QStringLiteral("joy.cpl"));
+        return;
+    }
+    if (section == QStringLiteral("Sound")) {
+        QProcess::startDetached(QStringLiteral("control.exe"), QStringList() << QStringLiteral("mmsys.cpl"));
+        return;
+    }
+    if (section == QStringLiteral("System Settings")) {
+        if (tile == QStringLiteral("Language")) QProcess::startDetached(QStringLiteral("control.exe"), QStringList() << QStringLiteral("intl.cpl"));
+        else if (tile == QStringLiteral("Power Saving")) QProcess::startDetached(QStringLiteral("control.exe"), QStringList() << QStringLiteral("powercfg.cpl"));
+        else if (tile == QStringLiteral("Video Options")) QProcess::startDetached(QStringLiteral("control.exe"), QStringList() << QStringLiteral("desk.cpl"));
+        else if (tile == QStringLiteral("Data Management")) QProcess::startDetached(QStringLiteral("explorer.exe"), QStringList() << QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+        else if (tile == QStringLiteral("Developer Tools")) QProcess::startDetached(QStringLiteral("explorer.exe"), QStringList() << QCoreApplication::applicationDirPath());
+        else {
+            KadiaSettingsDialog dialog(this); dialog.exec();
+        }
+        return;
+    }
+
+    if (section == QStringLiteral("Updates + Downloads") || tile == QStringLiteral("Update Gamelist") || tile == QStringLiteral("Scrape Now")) {
+        if (tile == QStringLiteral("Update Gamelist") || tile == QStringLiteral("Scrape Now") || tile == QStringLiteral("Check Updates")) {
+            if (m_romScanner && !m_romScanner->isRunning()) {
+                delete m_romScanner;
+                m_romScanner = 0;
+            }
+            if (m_metadataWorker && !m_metadataWorker->isRunning()) {
+                delete m_metadataWorker;
+                m_metadataWorker = 0;
+            }
+            runPostStartupChecks();
+        } else {
+            QMessageBox::information(this, QStringLiteral("Mathery Kadia!"),
+                                     QStringLiteral("%1 is available through the configured frontend/download provider.").arg(tile));
+        }
+        return;
+    }
+
+    if (tile == QStringLiteral("User Manual") || tile == QStringLiteral("Manual")) {
+        const QString readme = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("README.md"));
+        if (QFileInfo(readme).exists()) QProcess::startDetached(QStringLiteral("notepad.exe"), QStringList() << readme);
+        else QMessageBox::information(this, QStringLiteral("Mathery Kadia!"), QStringLiteral("The local manual was not found next to Kadia.exe."));
+        return;
+    }
+
+    // Settings-like tiles are persisted instead of remaining inert. This gives
+    // every non-Media-Center configuration tile an immediate, reversible action.
+    const bool mediaCenterOnly = section == QStringLiteral("TV + Movies") || section == QStringLiteral("Music") ||
+                                 section == QStringLiteral("Pictures + Videos") || section == QStringLiteral("Sports") ||
+                                 section == QStringLiteral("Online Media") || section == QStringLiteral("Extras") ||
+                                 section == QStringLiteral("Tasks");
+    if (mediaCenterOnly) {
+        QMessageBox::information(this, QStringLiteral("Windows Media Center feature"),
+                                 QStringLiteral("%1 is intentionally left to the Windows Media Center/media backend.").arg(tile));
+        return;
+    }
+
+    QSettings settings(KadiaSettings::settingsPath(), QSettings::IniFormat);
+    QString key = (section + QLatin1Char('/') + tile).toLower();
+    for (int i = 0; i < key.size(); ++i)
+        if (!key.at(i).isLetterOrNumber() && key.at(i) != QLatin1Char('/')) key[i] = QLatin1Char('_');
+    const bool current = settings.value(QStringLiteral("actions/") + key, false).toBool();
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this, tile, QStringLiteral("%1 is currently %2. Toggle it?").arg(tile, current ? QStringLiteral("enabled") : QStringLiteral("disabled")),
+        QMessageBox::Yes | QMessageBox::No);
+    if (answer == QMessageBox::Yes) {
+        settings.setValue(QStringLiteral("actions/") + key, !current);
+        settings.sync();
     }
 }
 
@@ -489,6 +648,8 @@ void KadiaWindow::dispatch(InputManager::Action action)
     case InputManager::Right: m_scene.handle(KadiaScene::MoveRight); break;
     case InputManager::Accept: m_scene.handle(KadiaScene::Accept); break;
     case InputManager::Back: m_scene.handle(KadiaScene::Back); break;
+    case InputManager::ToggleGallery: m_scene.handle(KadiaScene::ToggleGallery); break;
+    case InputManager::CycleSort: m_scene.handle(KadiaScene::CycleSort); break;
     default: break;
     }
 }

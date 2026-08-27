@@ -11,7 +11,8 @@ required = [
     'src/main.cpp', 'src/kadia_window.cpp', 'src/kadia_scene.cpp',
     'src/d3d9_renderer.cpp', 'src/input_manager.cpp',
     'src/ffmpeg_runtime.cpp', 'src/ui_model.cpp',
-    'assets/kadia_logo.argb', 'design/kadia_html_reference.html',
+    'src/game_stats.cpp', 'src/emulator_manager.cpp', 'src/kadia_settings.cpp',
+    'assets/kadia_logo.argb',
     '.github/workflows/build-xp.yml',
     'third_party/ffmpeg/include/libavutil/avutil.h',
     'third_party/ffmpeg/lib/avutil.lib',
@@ -58,6 +59,22 @@ scene = (root / 'src/kadia_scene.cpp').read_text(encoding='utf-8')
 for needle in ['setViewportSize', 'drawTileIcon', 'hoverAt', 'maxTrail']:
     if needle not in scene:
         errors.append(f'scene implementation missing expected token: {needle}')
+
+for needle in ['ToggleGallery', 'CycleSort', 'LaunchSelectedGame', 'drawGallery']:
+    if needle not in scene and needle not in window:
+        errors.append(f'gallery implementation missing expected token: {needle}')
+
+for rel in [
+    'assets/console_icons/playstation.argb',
+    'assets/console_icons/playstation2.argb',
+    'assets/console_icons/playstation3.argb',
+    'assets/console_icons/psp.argb',
+    'assets/console_icons/psvita.argb',
+    'assets/console_icons/sega.argb',
+    'assets/console_icons/atari.argb',
+]:
+    if not (root / rel).exists():
+        errors.append(f'missing console icon asset: {rel}')
 
 if errors:
     print('PACKAGE VALIDATION FAILED')

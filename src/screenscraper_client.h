@@ -13,6 +13,7 @@ struct ScreenScraperMetadata
     QString title;
     QString description;
     QString coverPath;
+    QString releaseYear;
     QString source;
 };
 
