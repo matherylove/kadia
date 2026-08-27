@@ -1,6 +1,7 @@
 #include "desktop_capture.h"
 
 #include <QImage>
+#include <QHash>
 #include <QList>
 #include <QString>
 #include <QtGlobal>
@@ -15,6 +16,15 @@ namespace {
 
 static HWND g_cachedWallpaperWindow = 0;
 static DWORD g_lastWallpaperProbe = 0;
+static QImage g_lastGoodWallpaperFrame;
+
+struct PrintCaptureState
+{
+    int method;       // -1 unknown, -2 all print methods failed, 0..3 flags, 4 WM_PRINT
+    DWORD lastProbe;
+    PrintCaptureState() : method(-1), lastProbe(0) {}
+};
+static QHash<quintptr, PrintCaptureState> g_printCaptureStates;
 
 static qint64 intersectionArea(const RECT &a, const RECT &b)
 {
@@ -75,10 +85,23 @@ static bool isDesktopUiClass(HWND hwnd)
            _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0;
 }
 
+static bool hasWallpaperDesktopAncestor(HWND hwnd)
+{
+    HWND cursor = GetParent(hwnd);
+    for (int depth = 0; cursor && depth < 8; ++depth) {
+        wchar_t className[128] = {0};
+        GetClassNameW(cursor, className, 127);
+        if (_wcsicmp(className, L"WorkerW") == 0 || _wcsicmp(className, L"Progman") == 0)
+            return true;
+        cursor = GetParent(cursor);
+    }
+    return false;
+}
+
 static BOOL CALLBACK wallpaperWindowCandidate(HWND hwnd, LPARAM param)
 {
     WindowSearch *search = reinterpret_cast<WindowSearch *>(param);
-    if (!search || !IsWindow(hwnd) || isDesktopUiClass(hwnd))
+    if (!search || !IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd) || isDesktopUiClass(hwnd))
         return TRUE;
 
     DWORD pid = 0;
@@ -90,8 +113,27 @@ static BOOL CALLBACK wallpaperWindowCandidate(HWND hwnd, LPARAM param)
     if (!GetWindowRect(hwnd, &rect))
         return TRUE;
     const qint64 area = intersectionArea(rect, search->target);
-    if (area > search->bestArea) {
-        search->bestArea = area;
+    if (area <= 0)
+        return TRUE;
+
+    // Wallpaper Engine normally exposes one visible renderer per display with
+    // a title such as "Wallpaper Engine 1". Prefer that renderer, then visible
+    // Wallpaper-Engine-owned children actually parented into WorkerW/Progman.
+    // This prevents a same-sized settings/preview window from winning merely
+    // because EnumWindows happened to visit it first.
+    qint64 score = area;
+    wchar_t title[256] = {0};
+    GetWindowTextW(hwnd, title, 255);
+    if (wcsstr(title, L"Wallpaper Engine") != 0)
+        score += area * 8;
+    if (hasWallpaperDesktopAncestor(hwnd))
+        score += area * 4;
+    const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if ((exStyle & WS_EX_TOOLWINDOW) != 0)
+        score /= 4;
+
+    if (score > search->bestArea) {
+        search->bestArea = score;
         search->best = hwnd;
     }
     return TRUE;
@@ -138,12 +180,50 @@ static BOOL CALLBACK findDefViewHostCallback(HWND hwnd, LPARAM param)
     return TRUE;
 }
 
+static void ensureWallpaperWorkerExists()
+{
+    static DWORD lastAttempt = 0;
+    const DWORD now = GetTickCount();
+    if (lastAttempt != 0 && static_cast<DWORD>(now - lastAttempt) < 5000u)
+        return;
+    lastAttempt = now;
+
+    HWND progman = FindWindowW(L"Progman", 0);
+    if (!progman)
+        return;
+
+    // Windows 7-10 traditionally accept 0/0. Newer Windows 11 raised-desktop
+    // builds create the wallpaper WorkerW with 0xD/0x1. Both messages are
+    // undocumented Explorer implementation details, so send them infrequently
+    // with a short timeout and tolerate either being ignored. On XP they are
+    // harmless.
+    DWORD_PTR ignored = 0;
+    SendMessageTimeoutW(progman, 0x052C, 0x000D, 0x0001,
+                        SMTO_ABORTIFHUNG | SMTO_NORMAL, 150, &ignored);
+    SendMessageTimeoutW(progman, 0x052C, 0, 0,
+                        SMTO_ABORTIFHUNG | SMTO_NORMAL, 150, &ignored);
+}
+
 static HWND findWallpaperWorker()
 {
-    // Explorer normally keeps SHELLDLL_DefView (desktop icons) in Progman or
-    // one WorkerW.  The WorkerW immediately behind that host is the wallpaper
-    // layer.  Selecting this layer is crucial: screen capture or the DefView
-    // host would also include icons, taskbars and ordinary application windows.
+    ensureWallpaperWorkerExists();
+
+    HWND progman = FindWindowW(L"Progman", 0);
+
+    // Windows 11 24H2+ can use a raised desktop: Progman is the top-level
+    // no-redirection host, SHELLDLL_DefView is a layered child, and the actual
+    // wallpaper is another WorkerW *child* of Progman below it. Prefer that
+    // child when present.
+    if (progman) {
+        HWND child = 0;
+        while ((child = FindWindowExW(progman, child, L"WorkerW", 0)) != 0) {
+            if (!FindWindowExW(child, 0, L"SHELLDLL_DefView", 0))
+                return child;
+        }
+    }
+
+    // Classic shell layout: the host containing SHELLDLL_DefView has a top-level
+    // WorkerW sibling immediately behind it.
     DefViewSearch search;
     EnumWindows(findDefViewHostCallback, reinterpret_cast<LPARAM>(&search));
     if (search.host) {
@@ -152,8 +232,11 @@ static HWND findWallpaperWorker()
             return worker;
     }
 
-    HWND progman = FindWindowW(L"Progman", 0);
-    return progman;
+    // Do not capture Progman as a fallback: on classic shells it can also own
+    // SHELLDLL_DefView/SysListView32 and therefore desktop icons. If there is no
+    // dedicated wallpaper WorkerW, return null and let Kadia use the already
+    // loaded static Windows wallpaper image instead.
+    return 0;
 }
 
 struct ChildLayerSearch
@@ -238,6 +321,180 @@ static HWND wallpaperWindowForRect(const QRect &screenRect)
         g_cachedWallpaperWindow = 0;
     }
     return g_cachedWallpaperWindow;
+}
+
+static bool imageHasUsefulPixels(const QImage &image)
+{
+    if (image.isNull() || image.width() < 2 || image.height() < 2)
+        return false;
+
+    // GPU-backed wallpaper windows can report a successful GDI operation while
+    // returning a completely black surface. Sample a bounded grid so we can
+    // reject that false-success cheaply without scanning every pixel.
+    const QImage rgb = image.convertToFormat(QImage::Format_RGB32);
+    const int stepX = qMax(1, rgb.width() / 48);
+    const int stepY = qMax(1, rgb.height() / 30);
+    int sampled = 0;
+    int nonBlack = 0;
+    int minLum = 255;
+    int maxLum = 0;
+    for (int y = 0; y < rgb.height(); y += stepY) {
+        const QRgb *row = reinterpret_cast<const QRgb *>(rgb.constScanLine(y));
+        for (int x = 0; x < rgb.width(); x += stepX) {
+            const QRgb px = row[x];
+            const int lum = (qRed(px) * 54 + qGreen(px) * 183 + qBlue(px) * 19) >> 8;
+            minLum = qMin(minLum, lum);
+            maxLum = qMax(maxLum, lum);
+            if (qRed(px) > 5 || qGreen(px) > 5 || qBlue(px) > 5)
+                ++nonBlack;
+            ++sampled;
+        }
+    }
+    return sampled > 0 && (nonBlack > sampled / 100 || (maxLum - minLum) > 4);
+}
+
+static QImage captureWindowWithPrint(HWND hwnd, const QRect &screenRect, const QSize &outputSize)
+{
+    if (!hwnd || !IsWindow(hwnd) || screenRect.isEmpty() || outputSize.isEmpty())
+        return QImage();
+
+    RECT client;
+    ZeroMemory(&client, sizeof(client));
+    if (!GetClientRect(hwnd, &client))
+        return QImage();
+    const int clientWidth = client.right - client.left;
+    const int clientHeight = client.bottom - client.top;
+    if (clientWidth <= 0 || clientHeight <= 0 || clientWidth > 16384 || clientHeight > 16384)
+        return QImage();
+
+    POINT origin = {0, 0};
+    if (!ClientToScreen(hwnd, &origin))
+        return QImage();
+
+    HWND referenceWindow = hwnd;
+    HDC referenceDc = GetDC(referenceWindow);
+    if (!referenceDc) {
+        referenceWindow = 0;
+        referenceDc = GetDC(0);
+    }
+    if (!referenceDc)
+        return QImage();
+
+    HDC memoryDc = CreateCompatibleDC(referenceDc);
+    if (!memoryDc) {
+        ReleaseDC(referenceWindow, referenceDc);
+        return QImage();
+    }
+
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = clientWidth;
+    bmi.bmiHeader.biHeight = -clientHeight;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void *bits = 0;
+    HBITMAP bitmap = CreateDIBSection(memoryDc, &bmi, DIB_RGB_COLORS, &bits, 0, 0);
+    if (!bitmap || !bits) {
+        if (bitmap) DeleteObject(bitmap);
+        DeleteDC(memoryDc);
+        ReleaseDC(referenceWindow, referenceDc);
+        return QImage();
+    }
+
+    HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
+
+#ifndef PW_RENDERFULLCONTENT
+#  define PW_RENDERFULLCONTENT 0x00000002
+#endif
+
+    const QRect wanted(screenRect.left() - origin.x, screenRect.top() - origin.y,
+                       screenRect.width(), screenRect.height());
+    const QRect clipped = wanted.intersected(QRect(0, 0, clientWidth, clientHeight));
+    QImage result;
+
+    auto readResult = [&]() -> QImage {
+        if (clipped.isEmpty())
+            return QImage();
+        QImage wrapped(static_cast<uchar *>(bits), clientWidth, clientHeight,
+                       clientWidth * 4, QImage::Format_RGB32);
+        QImage region = wrapped.copy(clipped);
+        if (region.size() != outputSize)
+            region = region.scaled(outputSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        return imageHasUsefulPixels(region) ? region : QImage();
+    };
+
+    // Different Wallpaper Engine renderers behave differently here. Some D3D
+    // builds only respond to the ordinary PrintWindow path, while Chromium/
+    // DirectComposition-backed builds can require PW_RENDERFULLCONTENT.
+    const UINT printFlags[] = {
+        static_cast<UINT>(PW_CLIENTONLY | PW_RENDERFULLCONTENT),
+        static_cast<UINT>(PW_RENDERFULLCONTENT),
+        static_cast<UINT>(PW_CLIENTONLY),
+        0u
+    };
+
+    PrintCaptureState &state = g_printCaptureStates[reinterpret_cast<quintptr>(hwnd)];
+    const DWORD now = GetTickCount();
+
+    auto tryPrintFlag = [&](int method) -> QImage {
+        PatBlt(memoryDc, 0, 0, clientWidth, clientHeight, BLACKNESS);
+        if (!PrintWindow(hwnd, memoryDc, printFlags[method]))
+            return QImage();
+        return readResult();
+    };
+    auto tryWmPrint = [&]() -> QImage {
+        // Never use a blocking SendMessage here: a hung renderer must not freeze
+        // Kadia's UI. The pixels themselves are the success criterion.
+        PatBlt(memoryDc, 0, 0, clientWidth, clientHeight, BLACKNESS);
+        DWORD_PTR ignored = 0;
+        SendMessageTimeoutW(hwnd, WM_PRINT, reinterpret_cast<WPARAM>(memoryDc),
+                            PRF_CLIENT | PRF_ERASEBKGND | PRF_NONCLIENT | PRF_CHILDREN | PRF_OWNED,
+                            SMTO_ABORTIFHUNG | SMTO_NORMAL, 90, &ignored);
+        return readResult();
+    };
+
+    // Once a renderer has demonstrated which path works, use only that path on
+    // the 60 Hz hot loop. If all print paths are black, back off for 750 ms
+    // before probing again instead of issuing four expensive cross-process paint
+    // requests every frame.
+    if (state.method >= 0 && state.method <= 3) {
+        result = tryPrintFlag(state.method);
+        if (result.isNull())
+            state.method = -1;
+    } else if (state.method == 4) {
+        result = tryWmPrint();
+        if (result.isNull())
+            state.method = -1;
+    } else if (state.method == -2 && state.lastProbe != 0 &&
+               static_cast<DWORD>(now - state.lastProbe) < 750u) {
+        // Leave result null and let the cheap GDI/static fallback handle this frame.
+    }
+
+    if (result.isNull() && state.method == -1) {
+        for (int i = 0; i < 4 && result.isNull(); ++i) {
+            result = tryPrintFlag(i);
+            if (!result.isNull())
+                state.method = i;
+        }
+        if (result.isNull()) {
+            result = tryWmPrint();
+            if (!result.isNull())
+                state.method = 4;
+        }
+        if (result.isNull()) {
+            state.method = -2;
+            state.lastProbe = now;
+        }
+    }
+
+    SelectObject(memoryDc, oldBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(memoryDc);
+    ReleaseDC(referenceWindow, referenceDc);
+    return result;
 }
 
 static QImage captureWindowRegion(HWND hwnd, const QRect &screenRect, const QSize &outputSize)
@@ -336,14 +593,62 @@ bool setCaptureExclusion(WId windowId, bool enabled)
 QImage capture(const QRect &screenRect, const QSize &outputSize)
 {
 #ifdef Q_OS_WIN
-    // Capture only the wallpaper renderer. Never call GetDC(NULL) / BitBlt on
-    // the desktop here: that is the composited desktop and includes icons,
-    // taskbars and ordinary windows, which is explicitly not the requested
-    // transparency effect.
-    HWND source = wallpaperWindowForRect(screenRect);
-    if (!source)
+    if (screenRect.isEmpty() || outputSize.isEmpty())
         return QImage();
-    return captureWindowRegion(source, screenRect, outputSize);
+
+    // wallpaperWindowForRect() is deliberately cached. Walking every process,
+    // top-level window and child window at 60 Hz caused more work than the UI
+    // renderer itself on large libraries. Re-probe only on its 1.5 s cadence.
+    const HWND primary = wallpaperWindowForRect(screenRect);
+    if (primary) {
+        QImage frame = captureWindowWithPrint(primary, screenRect, outputSize);
+        if (frame.isNull()) {
+            frame = captureWindowRegion(primary, screenRect, outputSize);
+            if (!imageHasUsefulPixels(frame))
+                frame = QImage();
+        }
+        if (!frame.isNull()) {
+            g_lastGoodWallpaperFrame = frame;
+            return frame;
+        }
+    }
+
+    // If Wallpaper Engine recreated its renderer between cache probes, retry the
+    // shell wallpaper layer only after the primary path failed. This keeps the
+    // normal hot path cheap while still recovering quickly from renderer swaps.
+    QList<HWND> fallbacks;
+    const HWND worker = findWallpaperWorker();
+    if (worker && worker != primary)
+        fallbacks.append(worker);
+    const HWND generic = findGenericWallpaperChild(screenRect);
+    if (generic && generic != primary && !fallbacks.contains(generic))
+        fallbacks.append(generic);
+
+    for (int i = 0; i < fallbacks.size(); ++i) {
+        QImage frame = captureWindowWithPrint(fallbacks.at(i), screenRect, outputSize);
+        if (frame.isNull()) {
+            frame = captureWindowRegion(fallbacks.at(i), screenRect, outputSize);
+            if (!imageHasUsefulPixels(frame))
+                frame = QImage();
+        }
+        if (!frame.isNull()) {
+            g_lastGoodWallpaperFrame = frame;
+            g_cachedWallpaperWindow = fallbacks.at(i);
+            return frame;
+        }
+    }
+
+    // Do not flash to black when Wallpaper Engine swaps renderer windows or
+    // Explorer recreates WorkerW. Keep the most recent valid wallpaper frame
+    // until the next probe succeeds. The scene still owns the static Windows
+    // wallpaper underneath this live layer, so the very first failed capture
+    // also remains visually usable instead of becoming a black background.
+    if (!g_lastGoodWallpaperFrame.isNull()) {
+        if (g_lastGoodWallpaperFrame.size() == outputSize)
+            return g_lastGoodWallpaperFrame;
+        return g_lastGoodWallpaperFrame.scaled(outputSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    }
+    return QImage();
 #else
     Q_UNUSED(screenRect);
     Q_UNUSED(outputSize);

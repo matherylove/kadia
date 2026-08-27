@@ -1,5 +1,6 @@
 #include "kadia_settings.h"
 #include "background_settings.h"
+#include "emulator_manager.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -70,6 +71,12 @@ KadiaSettingsDialog::KadiaSettingsDialog(QWidget *parent)
     form->addRow(QStringLiteral("Default gallery sort:"), m_defaultSort);
     form->addRow(QString(), m_showClock);
     form->addRow(QStringLiteral("Background image:"), bgRow);
+
+    QPushButton *emulators = new QPushButton(QStringLiteral("Configure emulators..."), this);
+    connect(emulators, &QPushButton::clicked, [this]() {
+        EmulatorManager::configureEmulators(this);
+    });
+    form->addRow(QStringLiteral("Game emulators:"), emulators);
 
     QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     connect(buttons, SIGNAL(accepted()), this, SLOT(saveAndClose()));

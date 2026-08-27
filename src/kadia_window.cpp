@@ -73,9 +73,9 @@ KadiaWindow::KadiaWindow(QWidget *parent)
 
     // Some emulator builds ignore their fullscreen CLI option or create a new
     // game window after their launcher window. For a short period after launch,
-    // make the largest emulator-owned window borderless on its monitor. This is
-    // deliberately separate from the render timer, which is stopped while the
-    // game owns the display.
+    // give the emulator-owned fullscreen toggles (Alt+Enter, then F11) a chance,
+    // with ordinary maximization as the final reversible fallback. Kadia never
+    // rewrites emulator window styles or swapchain geometry.
     m_emulatorFullscreenTimer.setInterval(200);
     m_emulatorFullscreenTimer.setTimerType(Qt::CoarseTimer);
     connect(&m_emulatorFullscreenTimer, SIGNAL(timeout()), this, SLOT(enforceExternalFullscreen()));
@@ -355,14 +355,37 @@ void KadiaWindow::enforceExternalFullscreen()
         return;
     }
 
-    EmulatorManager::enforceFullscreen(m_activeEmulatorPid);
     ++m_fullscreenEnforceAttempts;
 
-    // Twelve seconds covers slow emulator startup/shader-cache transitions and
-    // launchers that replace their first window with a game window. The Win32
-    // adjustment uses SWP_NOACTIVATE, so this pass never steals focus if the
-    // user intentionally switches elsewhere.
-    if (m_fullscreenEnforceAttempts >= 60)
+    // Native emulator CLI fullscreen always gets first chance.  The old build
+    // rewrote HWND styles/size repeatedly, which could strand a renderer as a
+    // tiny square and made leaving fullscreen impossible.  The staged fallback
+    // below only asks the emulator to toggle itself, then gets out of the way.
+    if (m_fullscreenEnforceAttempts < 12)
+        return; // ~2.4 seconds at 200 ms
+
+    if (m_fullscreenEnforceAttempts == 12) {
+        if (EmulatorManager::enforceFullscreen(m_activeEmulatorPid, 0))
+            m_emulatorFullscreenTimer.stop();
+        return; // Alt+Enter request; wait before measuring the result
+    }
+
+    if (m_fullscreenEnforceAttempts == 20) {
+        if (EmulatorManager::enforceFullscreen(m_activeEmulatorPid, 1))
+            m_emulatorFullscreenTimer.stop();
+        return; // F11 request if Alt+Enter was ignored
+    }
+
+    if (m_fullscreenEnforceAttempts == 28) {
+        // A normal maximize is the final compatibility fallback. It is not fake
+        // borderless fullscreen, but it is fully reversible and cannot corrupt
+        // an emulator child renderer/swapchain.
+        EmulatorManager::enforceFullscreen(m_activeEmulatorPid, 2);
+        m_emulatorFullscreenTimer.stop();
+        return;
+    }
+
+    if (m_fullscreenEnforceAttempts >= 30)
         m_emulatorFullscreenTimer.stop();
 }
 
@@ -684,9 +707,9 @@ void KadiaWindow::processSceneCommands()
             m_activeEmulatorPid = launchedPid;
             m_fullscreenEnforceAttempts = 0;
             if (m_activeEmulatorPid > 0) {
-                // Run once quickly, then keep watching briefly for emulators
-                // that replace their launcher window with a renderer window.
-                QTimer::singleShot(120, this, SLOT(enforceExternalFullscreen()));
+                // Wait for the actual renderer window before staged,
+                // emulator-owned fullscreen shortcuts. Native CLI fullscreen
+                // gets first chance and Kadia never rewrites the HWND styles.
                 m_emulatorFullscreenTimer.start();
             }
             updateKadiaGameFromPath(path);

@@ -214,14 +214,63 @@ static const QImage *rawArgbIcon(const QString &resource)
 
 static QString consoleBrandResource(const QString &section, const QString &label)
 {
-    const QString key = (section + QLatin1Char(' ') + label).toLower();
-    if (key.contains(QStringLiteral("ps vita")) || key.contains(QStringLiteral("playstation vita"))) return QStringLiteral(":/assets/console_icons/psvita.argb");
-    if (key.contains(QStringLiteral("psp")) || key.contains(QStringLiteral("portable"))) return QStringLiteral(":/assets/console_icons/psp.argb");
-    if (key.contains(QStringLiteral("playstation 3"))) return QStringLiteral(":/assets/console_icons/playstation3.argb");
-    if (key.contains(QStringLiteral("playstation 2"))) return QStringLiteral(":/assets/console_icons/playstation2.argb");
-    if (key.contains(QStringLiteral("playstation"))) return QStringLiteral(":/assets/console_icons/playstation.argb");
-    if (label.compare(QStringLiteral("Sega"), Qt::CaseInsensitive) == 0) return QStringLiteral(":/assets/console_icons/sega.argb");
-    if (label.compare(QStringLiteral("Atari"), Qt::CaseInsensitive) == 0) return QStringLiteral(":/assets/console_icons/atari.argb");
+    const QString sectionKey = section.toLower();
+    const bool platformSection = sectionKey == QStringLiteral("consoles") ||
+                                 sectionKey == QStringLiteral("handhelds") ||
+                                 sectionKey == QStringLiteral("computers") ||
+                                 sectionKey == QStringLiteral("arcade");
+    if (!platformSection)
+        return QString();
+
+    const QString l = label.toLower();
+    // Every concrete platform exposed by Kadia has a dedicated local icon
+    // resource. There is deliberately no manufacturer-wide/generic console
+    // fallback: selecting N64, Saturn, Lynx, etc. always shows that platform's
+    // own mark/pictogram.
+    if (l == QStringLiteral("nintendo entertainment system")) return QStringLiteral(":/assets/console_icons/nes.argb");
+    if (l == QStringLiteral("super nintendo")) return QStringLiteral(":/assets/console_icons/snes.argb");
+    if (l == QStringLiteral("nintendo 64")) return QStringLiteral(":/assets/console_icons/n64.argb");
+    if (l == QStringLiteral("nintendo gamecube")) return QStringLiteral(":/assets/console_icons/gamecube.argb");
+    if (l == QStringLiteral("nintendo wii")) return QStringLiteral(":/assets/console_icons/wii.argb");
+    if (l == QStringLiteral("nintendo wii u")) return QStringLiteral(":/assets/console_icons/wiiu.argb");
+    if (l == QStringLiteral("nintendo switch")) return QStringLiteral(":/assets/console_icons/switch.argb");
+    if (l == QStringLiteral("sega master system")) return QStringLiteral(":/assets/console_icons/mastersystem.argb");
+    if (l == QStringLiteral("sega genesis / mega drive")) return QStringLiteral(":/assets/console_icons/genesis.argb");
+    if (l == QStringLiteral("sega saturn")) return QStringLiteral(":/assets/console_icons/saturn.argb");
+    if (l == QStringLiteral("sega dreamcast")) return QStringLiteral(":/assets/console_icons/dreamcast.argb");
+    if (l == QStringLiteral("playstation")) return QStringLiteral(":/assets/console_icons/playstation.argb");
+    if (l == QStringLiteral("playstation 2")) return QStringLiteral(":/assets/console_icons/playstation2.argb");
+    if (l == QStringLiteral("playstation 3")) return QStringLiteral(":/assets/console_icons/playstation3.argb");
+    if (l == QStringLiteral("xbox")) return QStringLiteral(":/assets/console_icons/xbox.argb");
+    if (l == QStringLiteral("xbox 360")) return QStringLiteral(":/assets/console_icons/xbox360.argb");
+    if (l == QStringLiteral("atari 2600")) return QStringLiteral(":/assets/console_icons/atari2600.argb");
+    if (l == QStringLiteral("atari 5200")) return QStringLiteral(":/assets/console_icons/atari5200.argb");
+    if (l == QStringLiteral("atari 7800")) return QStringLiteral(":/assets/console_icons/atari7800.argb");
+    if (l == QStringLiteral("pc engine / turbografx-16")) return QStringLiteral(":/assets/console_icons/pcengine.argb");
+    if (l == QStringLiteral("neo geo")) return QStringLiteral(":/assets/console_icons/neogeo.argb");
+
+    if (l == QStringLiteral("game boy")) return QStringLiteral(":/assets/console_icons/gameboy.argb");
+    if (l == QStringLiteral("game boy color")) return QStringLiteral(":/assets/console_icons/gameboycolor.argb");
+    if (l == QStringLiteral("game boy advance")) return QStringLiteral(":/assets/console_icons/gba.argb");
+    if (l == QStringLiteral("nintendo ds")) return QStringLiteral(":/assets/console_icons/nds.argb");
+    if (l == QStringLiteral("nintendo 3ds")) return QStringLiteral(":/assets/console_icons/n3ds.argb");
+    if (l == QStringLiteral("playstation portable")) return QStringLiteral(":/assets/console_icons/psp.argb");
+    if (l == QStringLiteral("playstation vita")) return QStringLiteral(":/assets/console_icons/psvita.argb");
+    if (l == QStringLiteral("sega game gear")) return QStringLiteral(":/assets/console_icons/gamegear.argb");
+    if (l == QStringLiteral("atari lynx")) return QStringLiteral(":/assets/console_icons/atarilynx.argb");
+    if (l == QStringLiteral("neo geo pocket")) return QStringLiteral(":/assets/console_icons/ngp.argb");
+    if (l == QStringLiteral("neo geo pocket color")) return QStringLiteral(":/assets/console_icons/ngpc.argb");
+    if (l == QStringLiteral("wonderswan")) return QStringLiteral(":/assets/console_icons/wonderswan.argb");
+    if (l == QStringLiteral("wonderswan color")) return QStringLiteral(":/assets/console_icons/wonderswancolor.argb");
+
+    if (l == QStringLiteral("msx")) return QStringLiteral(":/assets/console_icons/msx.argb");
+    if (l == QStringLiteral("commodore 64")) return QStringLiteral(":/assets/console_icons/c64.argb");
+    if (l == QStringLiteral("amiga")) return QStringLiteral(":/assets/console_icons/amiga.argb");
+    if (l == QStringLiteral("dos / pc")) return QStringLiteral(":/assets/console_icons/dospc.argb");
+
+    if (l == QStringLiteral("arcade")) return QStringLiteral(":/assets/console_icons/arcade.argb");
+    if (l == QStringLiteral("mame")) return QStringLiteral(":/assets/console_icons/mame.argb");
+    if (l == QStringLiteral("fbneo")) return QStringLiteral(":/assets/console_icons/fbneo.argb");
     return QString();
 }
 static const qreal kCarouselBaseWidth = 118.0;
@@ -1640,86 +1689,8 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
         }
     }
 
-    // Every concrete emulated system gets its own local vector badge. These
-    // are drawn directly with QPainter so they are available on the XP build
-    // without an SVG plugin. PlayStation models above still use their bundled
-    // marks; the remaining systems use a device-specific console/handheld
-    // silhouette plus the actual platform abbreviation instead of a generic
-    // manufacturer icon.
-    const bool platformSection = sectionKey == QStringLiteral("consoles") ||
-                                 sectionKey == QStringLiteral("handhelds") ||
-                                 sectionKey == QStringLiteral("computers") ||
-                                 sectionKey == QStringLiteral("arcade");
-    if (platformSection) {
-        QString badge;
-        const QString l = label.toLower();
-        if (l == QStringLiteral("nintendo entertainment system")) badge = QStringLiteral("NES");
-        else if (l == QStringLiteral("super nintendo")) badge = QStringLiteral("SNES");
-        else if (l == QStringLiteral("nintendo 64")) badge = QStringLiteral("N64");
-        else if (l == QStringLiteral("nintendo gamecube")) badge = QStringLiteral("GC");
-        else if (l == QStringLiteral("nintendo wii")) badge = QStringLiteral("Wii");
-        else if (l == QStringLiteral("nintendo wii u")) badge = QStringLiteral("Wii U");
-        else if (l == QStringLiteral("nintendo switch")) badge = QStringLiteral("SWITCH");
-        else if (l == QStringLiteral("sega master system")) badge = QStringLiteral("MASTER");
-        else if (l == QStringLiteral("sega genesis / mega drive")) badge = QStringLiteral("MD / GEN");
-        else if (l == QStringLiteral("sega saturn")) badge = QStringLiteral("SATURN");
-        else if (l == QStringLiteral("sega dreamcast")) badge = QStringLiteral("DC");
-        else if (l == QStringLiteral("xbox")) badge = QStringLiteral("XBOX");
-        else if (l == QStringLiteral("xbox 360")) badge = QStringLiteral("XBOX 360");
-        else if (l == QStringLiteral("atari 2600")) badge = QStringLiteral("2600");
-        else if (l == QStringLiteral("atari 5200")) badge = QStringLiteral("5200");
-        else if (l == QStringLiteral("atari 7800")) badge = QStringLiteral("7800");
-        else if (l == QStringLiteral("pc engine / turbografx-16")) badge = QStringLiteral("PCE / TG16");
-        else if (l == QStringLiteral("neo geo")) badge = QStringLiteral("NEO GEO");
-        else if (l == QStringLiteral("game boy")) badge = QStringLiteral("GB");
-        else if (l == QStringLiteral("game boy color")) badge = QStringLiteral("GBC");
-        else if (l == QStringLiteral("game boy advance")) badge = QStringLiteral("GBA");
-        else if (l == QStringLiteral("nintendo ds")) badge = QStringLiteral("DS");
-        else if (l == QStringLiteral("nintendo 3ds")) badge = QStringLiteral("3DS");
-        else if (l == QStringLiteral("sega game gear")) badge = QStringLiteral("GAME GEAR");
-        else if (l == QStringLiteral("atari lynx")) badge = QStringLiteral("LYNX");
-        else if (l == QStringLiteral("neo geo pocket")) badge = QStringLiteral("NGP");
-        else if (l == QStringLiteral("neo geo pocket color")) badge = QStringLiteral("NGPC");
-        else if (l == QStringLiteral("wonderswan")) badge = QStringLiteral("WS");
-        else if (l == QStringLiteral("wonderswan color")) badge = QStringLiteral("WSC");
-        else if (l == QStringLiteral("msx")) badge = QStringLiteral("MSX");
-        else if (l == QStringLiteral("commodore 64")) badge = QStringLiteral("C64");
-        else if (l == QStringLiteral("amiga")) badge = QStringLiteral("AMIGA");
-        else if (l == QStringLiteral("dos / pc")) badge = QStringLiteral("DOS / PC");
-        else if (l == QStringLiteral("arcade") || l == QStringLiteral("mame") || l == QStringLiteral("fbneo")) badge = QStringLiteral("ARCADE");
-
-        if (!badge.isEmpty()) {
-            const bool handheld = sectionKey == QStringLiteral("handhelds");
-            p.setPen(QPen(c, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            p.setBrush(QColor(255, 248, 231, 18));
-            if (handheld) {
-                const QRectF body(center.x() - base * 1.10, center.y() - base * 1.20,
-                                  base * 2.20, base * 2.40);
-                p.drawRoundedRect(body, base * 0.28, base * 0.28);
-                p.drawRoundedRect(QRectF(center.x() - base * 0.76, center.y() - base * 0.78,
-                                         base * 1.52, base * 0.92), base * 0.08, base * 0.08);
-                p.drawEllipse(QPointF(center.x() - base * 0.55, center.y() + base * 0.58), base * 0.15, base * 0.15);
-                p.drawEllipse(QPointF(center.x() + base * 0.58, center.y() + base * 0.48), base * 0.12, base * 0.12);
-                p.drawEllipse(QPointF(center.x() + base * 0.82, center.y() + base * 0.66), base * 0.12, base * 0.12);
-            } else {
-                const QRectF body(center.x() - base * 1.25, center.y() - base * 0.72,
-                                  base * 2.50, base * 1.44);
-                p.drawRoundedRect(body, base * 0.16, base * 0.16);
-                p.drawLine(QPointF(body.left() + base * 0.28, center.y() + base * 0.35),
-                           QPointF(body.right() - base * 0.28, center.y() + base * 0.35));
-                p.drawEllipse(QPointF(body.right() - base * 0.30, body.top() + base * 0.28), base * 0.08, base * 0.08);
-            }
-            QFont badgeFont = fontForPixelSize(qMax(9, static_cast<int>(base * 0.48)), QFont::DemiBold);
-            badgeFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.4);
-            p.setFont(badgeFont);
-            p.setPen(QColor(255, 248, 231, 235));
-            const QRectF textRect(center.x() - base * 1.05, center.y() - base * 0.26,
-                                  base * 2.10, base * 0.52);
-            p.drawText(textRect, Qt::AlignCenter, badge);
-            p.restore();
-            return;
-        }
-    }
+    // Concrete platforms above never fall through to a generic hardware badge.
+    // Non-platform action tiles continue through the semantic icon renderer below.
 
     auto has = [&](const char *needle) -> bool {
         return key.contains(QString::fromLatin1(needle));
