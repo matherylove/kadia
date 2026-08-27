@@ -62,6 +62,7 @@ private:
     void ensureRenderer();
     void dispatch(InputManager::Action action);
     void processSceneCommands();
+    QSize renderSurfaceSize() const;
 
     D3D9Renderer m_renderer;
     InputManager m_input;
@@ -88,6 +89,7 @@ private:
     bool m_romDialogActive;
     bool m_romScanCancelled;
     bool m_postStartupChecksCompleted;
+    bool m_liveDesktopBackground;
     QString m_activeGamePath;
     QDateTime m_activeGameStarted;
 };

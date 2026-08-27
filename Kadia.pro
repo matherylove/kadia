@@ -45,6 +45,7 @@ SOURCES += \
     src/kadia_window.cpp \
     src/kadia_scene.cpp \
     src/d3d9_renderer.cpp \
+    src/desktop_capture.cpp \
     src/input_manager.cpp \
     src/ffmpeg_runtime.cpp \
     src/klite_bootstrap.cpp \
@@ -64,6 +65,7 @@ HEADERS += \
     src/kadia_window.h \
     src/kadia_scene.h \
     src/d3d9_renderer.h \
+    src/desktop_capture.h \
     src/input_manager.h \
     src/ffmpeg_runtime.h \
     src/klite_bootstrap.h \

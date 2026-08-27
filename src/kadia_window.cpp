@@ -1,5 +1,6 @@
 #include "kadia_window.h"
 #include "background_settings.h"
+#include "desktop_capture.h"
 #include "rom_scanner.h"
 #include "libretro_metadata.h"
 #include "windspro_bootstrap.h"
@@ -25,6 +26,7 @@
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QWheelEvent>
+#include <QtMath>
 
 KadiaWindow::KadiaWindow(QWidget *parent)
     : QWidget(parent)
@@ -40,6 +42,7 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     , m_romDialogActive(false)
     , m_romScanCancelled(false)
     , m_postStartupChecksCompleted(false)
+    , m_liveDesktopBackground(false)
 {
     setWindowTitle(QStringLiteral("Mathery Kadia!"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -52,7 +55,9 @@ KadiaWindow::KadiaWindow(QWidget *parent)
     setCursor(Qt::ArrowCursor);
     resize(m_scene.logicalSize());
     m_scene.setViewportSize(size());
-    BackgroundSettings::applyToScene(&m_scene, BackgroundSettings::load());
+    const BackgroundPreferences initialBackground = BackgroundSettings::load();
+    m_liveDesktopBackground = initialBackground.mode == BackgroundPreferences::DesktopWallpaper && initialBackground.opacity > 0;
+    BackgroundSettings::applyToScene(&m_scene, initialBackground);
     refreshKadiaGameLibrary();
     setKadiaUnknownRoms(RomCatalog::pathsForClassification(QStringLiteral("Unknown")));
 
@@ -68,6 +73,7 @@ KadiaWindow::KadiaWindow(QWidget *parent)
 KadiaWindow::~KadiaWindow()
 {
     m_timer.stop();
+    DesktopCapture::setCaptureExclusion(winId(), false);
     if (m_romScanner) {
         m_romScanner->requestStop();
         m_romScanner->wait();
@@ -132,6 +138,7 @@ void KadiaWindow::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     ensureRenderer();
+    DesktopCapture::setCaptureExclusion(winId(), m_liveDesktopBackground);
     m_clock.start();
     if (!m_timer.isActive())
         m_timer.start();
@@ -377,9 +384,47 @@ void KadiaWindow::frameTick()
 
     m_scene.setViewportSize(size());
     m_scene.update(dt);
-    m_scene.render(m_frame);
+
+    const QSize renderSize = renderSurfaceSize();
+    if (m_liveDesktopBackground) {
+        const QPoint globalTopLeft = mapToGlobal(QPoint(0, 0));
+        const QRect desktopRegion(globalTopLeft, size());
+        const QImage desktopFrame = DesktopCapture::capture(desktopRegion, renderSize);
+        if (!desktopFrame.isNull())
+            m_scene.setBackgroundImage(desktopFrame);
+    }
+
+    m_scene.render(m_frame, renderSize);
     if (!m_renderer.present(m_frame) && !m_renderer.lastError().isEmpty())
         qWarning() << m_renderer.lastError();
+}
+
+QSize KadiaWindow::renderSurfaceSize() const
+{
+    const QSize nativeSize(qMax(1, width()), qMax(1, height()));
+    const qint64 nativePixels = static_cast<qint64>(nativeSize.width()) * nativeSize.height();
+    const int hz = m_renderer.isReady() ? m_renderer.refreshRate() : 60;
+
+    // QPainter is the expensive part of Kadia's frame. Keep native layout and
+    // hit testing but cap the software-rasterized pixel count more aggressively
+    // as refresh rate rises. D3D9 then performs the inexpensive final upscale.
+    qint64 pixelBudget = 2200000;       // ~1080p at 60/75 Hz
+    if (hz >= 165) pixelBudget = 900000;
+    else if (hz >= 144) pixelBudget = 1050000;
+    else if (hz >= 120) pixelBudget = 1250000;
+    else if (hz >= 90) pixelBudget = 1550000;
+
+    if (nativePixels <= pixelBudget)
+        return nativeSize;
+
+    const qreal scale = qSqrt(static_cast<qreal>(pixelBudget) / static_cast<qreal>(nativePixels));
+    int w = qMax(640, static_cast<int>(nativeSize.width() * scale));
+    int h = qMax(360, static_cast<int>(nativeSize.height() * scale));
+    // Even dimensions behave better on old D3D9 drivers and avoid half-pixel
+    // sampling asymmetry during StretchRect.
+    w &= ~1;
+    h &= ~1;
+    return QSize(qMax(2, w), qMax(2, h));
 }
 
 void KadiaWindow::runPostStartupChecks()
@@ -563,8 +608,12 @@ void KadiaWindow::processSceneCommands()
 
     if (command == KadiaScene::OpenBackgroundSettings) {
         BackgroundSettingsDialog dialog(this);
-        if (dialog.exec() == QDialog::Accepted)
-            BackgroundSettings::applyToScene(&m_scene, dialog.preferences());
+        if (dialog.exec() == QDialog::Accepted) {
+            const BackgroundPreferences preferences = dialog.preferences();
+            m_liveDesktopBackground = preferences.mode == BackgroundPreferences::DesktopWallpaper && preferences.opacity > 0;
+            DesktopCapture::setCaptureExclusion(winId(), m_liveDesktopBackground);
+            BackgroundSettings::applyToScene(&m_scene, preferences);
+        }
         return;
     }
 
@@ -573,7 +622,10 @@ void KadiaWindow::processSceneCommands()
         if (dialog.exec() == QDialog::Accepted) {
             setKadiaGameSort(static_cast<KadiaGameSort>(KadiaSettings::defaultGallerySort()));
             refreshKadiaGameLibrary();
-            BackgroundSettings::applyToScene(&m_scene, BackgroundSettings::load());
+            const BackgroundPreferences preferences = BackgroundSettings::load();
+            m_liveDesktopBackground = preferences.mode == BackgroundPreferences::DesktopWallpaper && preferences.opacity > 0;
+            DesktopCapture::setCaptureExclusion(winId(), m_liveDesktopBackground);
+            BackgroundSettings::applyToScene(&m_scene, preferences);
         }
         return;
     }

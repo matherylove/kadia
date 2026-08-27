@@ -17,6 +17,8 @@ struct BackgroundPreferences
 {
     enum Mode {
         KadiaDefault = 0,
+        // Historical enum name kept for settings compatibility. Mode 1 is a
+        // live desktop capture, not a one-time wallpaper bitmap.
         DesktopWallpaper = 1,
         CustomImage = 2
     };

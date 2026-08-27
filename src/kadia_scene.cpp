@@ -379,9 +379,12 @@ void KadiaScene::update(double dtSeconds)
     updateStars(dtSeconds);
 }
 
-void KadiaScene::render(QImage &target)
+void KadiaScene::render(QImage &target, const QSize &renderSize)
 {
-    const QSize targetSize = m_viewportSize.isValid() ? m_viewportSize : logicalSize();
+    const QSize viewport = m_viewportSize.isValid() ? m_viewportSize : logicalSize();
+    QSize targetSize = renderSize.isValid() ? renderSize : viewport;
+    targetSize.setWidth(qMax(320, targetSize.width()));
+    targetSize.setHeight(qMax(180, targetSize.height()));
     if (target.size() != targetSize || target.format() != QImage::Format_ARGB32_Premultiplied)
         target = QImage(targetSize, QImage::Format_ARGB32_Premultiplied);
 
@@ -391,6 +394,13 @@ void KadiaScene::render(QImage &target)
     p.setRenderHint(QPainter::TextAntialiasing, true);
     p.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
+    // Layout and hit-testing remain in native client coordinates. Only the
+    // raster workload is reduced; Direct3D scales this internal canvas back
+    // to the monitor with linear filtering. This is the critical path for
+    // sustaining 120/144/165 Hz on large desktop resolutions.
+    const qreal sx = static_cast<qreal>(targetSize.width()) / qMax(1, viewport.width());
+    const qreal sy = static_cast<qreal>(targetSize.height()) / qMax(1, viewport.height());
+    p.scale(sx, sy);
     drawFrame(p);
 }
 
@@ -1261,9 +1271,9 @@ void KadiaScene::drawLibrary(QPainter &p)
                QStringLiteral("Library"));
 
     p.setFont(fontForPixelSize(44, QFont::Light));
-    p.setPen(latte(255));
-    drawTextShadow(p, QRectF(kHubLeft, railTop + 34.0, 500.0, 51.0),
-                   Qt::AlignLeft | Qt::AlignVCenter, m_libraryTitle, latte(255));
+    const QRectF libraryTitleRect(kHubLeft, railTop + 34.0,
+                                  qMin<qreal>(500.0, hubWidth()), 51.0);
+    drawMarqueeLine(p, libraryTitleRect, m_libraryTitle, latte(255), true, QPointF(0.0, 2.0));
 
     p.setFont(fontForPixelSize(18, QFont::Light));
     p.setPen(QColor(255, 248, 231, 118));
@@ -1449,9 +1459,9 @@ void KadiaScene::drawCategoryRail(QPainter &p)
         }
 
         p.setFont(fontForPixelSize(px, QFont::Light));
-        const QRectF r(kHubLeft, top + yPositions[pos], 430.0, height);
+        const QRectF r(kHubLeft, top + yPositions[pos], qMin<qreal>(430.0, hubWidth()), height);
         const QColor color = QColor(255, 248, 231, alpha);
-        drawTextShadow(p, r, Qt::AlignLeft | Qt::AlignVCenter, sections[index].name, color);
+        drawMarqueeLine(p, r, sections[index].name, color, offset == 0, QPointF(0.0, 2.0));
     }
     p.restore();
 }
@@ -1544,12 +1554,11 @@ void KadiaScene::drawTile(QPainter &p, const QRectF &rect, float selection,
                       rect.width() - 2.0, labelH - 1.0), labelBg);
 
     p.setFont(fontForPixelSize(static_cast<int>(12.0 + 2.0 * selection), QFont::Normal));
-    p.setPen(QColor(255, 248, 231, 235));
-    p.drawText(QRectF(rect.left() + 10.0 + 2.0 * selection,
-                      rect.bottom() - labelH,
-                      rect.width() - 20.0,
-                      labelH),
-               Qt::AlignLeft | Qt::AlignVCenter, label);
+    drawMarqueeLine(p, QRectF(rect.left() + 10.0 + 2.0 * selection,
+                              rect.bottom() - labelH,
+                              rect.width() - 20.0,
+                              labelH),
+                     label, QColor(255, 248, 231, 235), selection > 0.50f);
 
     if (selection > 0.02f) {
         p.setBrush(Qt::NoBrush);
@@ -2162,14 +2171,12 @@ void KadiaScene::drawDescriptionPanel(QPainter &p, const QRectF &rect,
     const qreal width = rect.width() - 44.0;
 
     p.setFont(fontForPixelSize(withPlayHint ? 27 : 25, QFont::Light));
-    p.setPen(QColor(255, 248, 231, 235));
-    const QString shownTitle = QFontMetrics(p.font()).elidedText(title, Qt::ElideRight, qMax(20, static_cast<int>(width)));
-    p.drawText(QRectF(x, rect.top() + 20.0, width, 34.0), Qt::AlignLeft | Qt::AlignVCenter, shownTitle);
+    drawMarqueeLine(p, QRectF(x, rect.top() + 20.0, width, 34.0),
+                     title, QColor(255, 248, 231, 235), true);
 
     p.setFont(fontForPixelSize(12, QFont::Normal));
-    p.setPen(QColor(255, 248, 231, 108));
-    const QString shownSub = QFontMetrics(p.font()).elidedText(sub, Qt::ElideRight, qMax(20, static_cast<int>(width)));
-    p.drawText(QRectF(x, rect.top() + 53.0, width, 20.0), Qt::AlignLeft | Qt::AlignVCenter, shownSub);
+    drawMarqueeLine(p, QRectF(x, rect.top() + 53.0, width, 20.0),
+                     sub, QColor(255, 248, 231, 108), true);
 
     p.setFont(fontForPixelSize(13, QFont::Normal));
     p.setPen(QColor(255, 248, 231, 174));
@@ -2255,11 +2262,8 @@ void KadiaScene::drawGameCard(QPainter &p, const QRectF &rect, float selection, 
 
     if (game) {
         p.setFont(fontForPixelSize(static_cast<int>(11.0 + 2.0 * selection), QFont::Normal));
-        p.setPen(QColor(255,248,231,238));
-        const int textWidth = qMax(12, static_cast<int>(rect.width() - 18.0));
-        const QString shown = QFontMetrics(p.font()).elidedText(game->title, Qt::ElideRight, textWidth);
-        p.drawText(QRectF(rect.left()+9.0, rect.bottom()-labelH, rect.width()-18.0, labelH),
-                   Qt::AlignLeft | Qt::AlignVCenter, shown);
+        drawMarqueeLine(p, QRectF(rect.left()+9.0, rect.bottom()-labelH, rect.width()-18.0, labelH),
+                         game->title, QColor(255,248,231,238), selection > 0.50f);
     }
     p.restore();
 }
@@ -2423,6 +2427,68 @@ void KadiaScene::drawControllerHints(QPainter &p, qreal x, qreal centerY)
         p.drawText(QRectF(cursor, centerY-10.0, 62.0, 20.0), Qt::AlignLeft | Qt::AlignVCenter, hints[i].text);
         cursor += 68.0;
     }
+    p.restore();
+}
+
+void KadiaScene::drawMarqueeLine(QPainter &p, const QRectF &rect, const QString &text,
+                                  const QColor &color, bool animate,
+                                  const QPointF &shadowOffset)
+{
+    if (rect.isEmpty() || text.isEmpty())
+        return;
+
+    const QFontMetricsF fm(p.font());
+    const qreal textWidth = fm.width(text);
+    if (textWidth <= rect.width() + 0.5) {
+        if (!shadowOffset.isNull()) {
+            p.setPen(QColor(0, 0, 0, qMin(180, color.alpha())));
+            p.drawText(rect.translated(shadowOffset), Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, text);
+        }
+        p.setPen(color);
+        p.drawText(rect, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, text);
+        return;
+    }
+
+    if (!animate) {
+        const QString shown = QFontMetrics(p.font()).elidedText(text, Qt::ElideRight,
+                                                                qMax(12, static_cast<int>(rect.width())));
+        p.setPen(color);
+        p.drawText(rect, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, shown);
+        return;
+    }
+
+    // Phone-style marquee: wait, glide to the far end, wait, glide back.
+    // Everything is derived from m_time so speed is independent of monitor Hz.
+    const qreal overflow = qMax<qreal>(0.0, textWidth - rect.width());
+    const qreal pause = 1.05;
+    const qreal pixelsPerSecond = 52.0;
+    const qreal travel = qMax<qreal>(0.20, overflow / pixelsPerSecond);
+    const qreal period = pause + travel + pause + travel;
+    qreal phase = std::fmod(qMax(0.0, m_time), static_cast<double>(period));
+    qreal offset = 0.0;
+    if (phase < pause) {
+        offset = 0.0;
+    } else if ((phase -= pause) < travel) {
+        const qreal t = qBound<qreal>(0.0, phase / travel, 1.0);
+        offset = overflow * (t * t * (3.0 - 2.0 * t));
+    } else if ((phase -= travel) < pause) {
+        offset = overflow;
+    } else {
+        phase -= pause;
+        const qreal t = qBound<qreal>(0.0, phase / travel, 1.0);
+        offset = overflow * (1.0 - t * t * (3.0 - 2.0 * t));
+    }
+
+    p.save();
+    p.setClipRect(rect);
+    const qreal baseline = rect.center().y() + (fm.ascent() - fm.descent()) * 0.5;
+    const QPointF point(rect.left() - offset, baseline);
+    if (!shadowOffset.isNull()) {
+        p.setPen(QColor(0, 0, 0, qMin(180, color.alpha())));
+        p.drawText(point + shadowOffset, text);
+    }
+    p.setPen(color);
+    p.drawText(point, text);
     p.restore();
 }
 

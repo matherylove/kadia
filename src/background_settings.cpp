@@ -153,6 +153,10 @@ void applyToScene(KadiaScene *scene, const BackgroundPreferences &p)
         return;
 
     QImage image;
+    // DesktopWallpaper is now a live desktop passthrough. KadiaWindow feeds
+    // animated frames every render tick. Keep the ordinary Windows wallpaper
+    // only as a fallback for systems where the shell/Wallpaper Engine surface
+    // cannot be captured (notably some old XP display drivers).
     if (p.mode == BackgroundPreferences::DesktopWallpaper)
         image = loadImage(desktopWallpaperPath());
     else if (p.mode == BackgroundPreferences::CustomImage)
@@ -300,7 +304,7 @@ BackgroundSettingsDialog::BackgroundSettingsDialog(QWidget *parent)
     sub->setWordWrap(true);
 
     m_modes->addItem(QStringLiteral("Kadia default"));
-    m_modes->addItem(QStringLiteral("Desktop wallpaper (translucent)"));
+    m_modes->addItem(QStringLiteral("Live desktop / Wallpaper Engine"));
     m_modes->addItem(QStringLiteral("Custom image"));
     m_modes->setFixedHeight(125);
     m_modes->setCurrentRow(qBound(0, m_preferences.mode, 2));
@@ -351,7 +355,7 @@ void BackgroundSettingsDialog::updateUi()
     m_preferences.opacity = m_opacity->value();
     m_opacityLabel->setText(QStringLiteral("%1%").arg(m_preferences.opacity));
     if (m_preferences.mode == BackgroundPreferences::DesktopWallpaper)
-        m_pathLabel->setText(QStringLiteral("Desktop wallpaper: %1").arg(QDir::toNativeSeparators(BackgroundSettings::desktopWallpaperPath())));
+        m_pathLabel->setText(QStringLiteral("Live capture of the desktop wallpaper surface (Wallpaper Engine is supported when detected)."));
     else if (m_preferences.mode == BackgroundPreferences::CustomImage)
         m_pathLabel->setText(m_preferences.customPath.isEmpty() ? QStringLiteral("No custom image selected") : QDir::toNativeSeparators(m_preferences.customPath));
     else

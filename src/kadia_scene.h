@@ -41,7 +41,7 @@ public:
     void setViewportSize(const QSize &size);
     QSize viewportSize() const;
     void update(double dtSeconds);
-    void render(QImage &target);
+    void render(QImage &target, const QSize &renderSize = QSize());
     void handle(Action action);
     void cycleWordmarkFont();
     void setControllerConnected(bool connected);
@@ -112,6 +112,9 @@ private:
     void drawTextShadow(QPainter &p, const QRectF &rect, int flags,
                         const QString &text, const QColor &color,
                         const QPointF &shadowOffset = QPointF(0.0, 2.0));
+    void drawMarqueeLine(QPainter &p, const QRectF &rect, const QString &text,
+                         const QColor &color, bool animate,
+                         const QPointF &shadowOffset = QPointF());
     void drawEllipticGlow(QPainter &p, const QPointF &center, qreal rx, qreal ry,
                           const QColor &inner, const QColor &outer);
 

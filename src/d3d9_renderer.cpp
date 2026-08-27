@@ -21,6 +21,7 @@ D3D9Renderer::D3D9Renderer()
     , m_surface(0)
     , m_hwnd(0)
     , m_deviceLost(false)
+    , m_adapter(D3DADAPTER_DEFAULT)
     , m_refreshRate(60)
 #endif
 {
@@ -174,14 +175,27 @@ bool D3D9Renderer::createDevice(HWND hwnd, int width, int height)
         return false;
     }
 
+    // Select the adapter driving the monitor that actually contains Kadia.
+    // D3DADAPTER_DEFAULT is often the primary display, but a moved window or
+    // multi-GPU setup can otherwise report/cap to the wrong refresh rate.
+    m_adapter = D3DADAPTER_DEFAULT;
+    const HMONITOR windowMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    const UINT adapterCount = m_d3d->GetAdapterCount();
+    for (UINT i = 0; i < adapterCount; ++i) {
+        if (m_d3d->GetAdapterMonitor(i) == windowMonitor) {
+            m_adapter = i;
+            break;
+        }
+    }
+
     D3DADAPTER_IDENTIFIER9 identifier;
     std::memset(&identifier, 0, sizeof(identifier));
-    if (SUCCEEDED(m_d3d->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &identifier)))
+    if (SUCCEEDED(m_d3d->GetAdapterIdentifier(m_adapter, 0, &identifier)))
         m_adapterName = QString::fromLatin1(identifier.Description);
 
     D3DDISPLAYMODE mode;
     std::memset(&mode, 0, sizeof(mode));
-    if (SUCCEEDED(m_d3d->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode)) && mode.RefreshRate > 0)
+    if (SUCCEEDED(m_d3d->GetAdapterDisplayMode(m_adapter, &mode)) && mode.RefreshRate > 0)
         m_refreshRate = static_cast<int>(mode.RefreshRate);
     else
         m_refreshRate = 60;
@@ -201,7 +215,7 @@ bool D3D9Renderer::createDevice(HWND hwnd, int width, int height)
     pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
 
     const DWORD flags = D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_FPU_PRESERVE;
-    HRESULT hr = m_d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
+    HRESULT hr = m_d3d->CreateDevice(m_adapter, D3DDEVTYPE_HAL,
                                      hwnd, flags, &pp, &m_device);
     if (FAILED(hr) || !m_device) {
         setError(hrString("IDirect3D9::CreateDevice", hr));
@@ -293,6 +307,7 @@ void D3D9Renderer::releaseAll()
     m_deviceLost = false;
     m_clientSize = QSize();
     m_adapterName.clear();
+    m_adapter = D3DADAPTER_DEFAULT;
     m_refreshRate = 60;
 }
 
