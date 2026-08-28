@@ -12,6 +12,7 @@ required = [
     'src/d3d9_renderer.cpp', 'src/input_manager.cpp',
     'src/ffmpeg_runtime.cpp', 'src/ui_model.cpp',
     'src/game_stats.cpp', 'src/emulator_manager.cpp', 'src/kadia_settings.cpp',
+    'src/media_library.cpp', 'src/media_library_dialog.cpp',
     'assets/kadia_logo.argb',
     '.github/workflows/build-xp.yml',
     'tools/sync-console-logos.py',
@@ -39,6 +40,19 @@ except Exception as exc:
 cpp = (root / 'src/ui_model.cpp').read_text(encoding='utf-8')
 if cpp.count('QStringLiteral(') < 800:
     errors.append('ui_model.cpp appears unexpectedly small')
+
+
+media = (root / 'src/media_library.cpp').read_text(encoding='utf-8')
+media_dialog = (root / 'src/media_library_dialog.cpp').read_text(encoding='utf-8')
+for needle in ['QDirIterator::Subdirectories', 'media/musicFolders', 'MediaRecordedTV', 'playAll']:
+    if needle not in media:
+        errors.append(f'media library implementation missing expected token: {needle}')
+for needle in ['MediaLibraryScanThread', 'Scanning configured', 'MediaLibrarySettingsDialog']:
+    if needle not in media_dialog:
+        errors.append(f'media browser implementation missing expected token: {needle}')
+for needle in ['platformTileHasGames', 'currentSystemKey', 'platformSections']:
+    if needle not in cpp:
+        errors.append(f'empty-platform catalog filtering missing expected token: {needle}')
 
 workflow = (root / '.github/workflows/build-xp.yml').read_text(encoding='utf-8')
 for needle in ['Qt-5.6.3-Static-XP.7z', 'Kadia.pro', 'Kadia.exe', 'Microsoft.VisualStudio.Component.WinXP',

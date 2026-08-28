@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QTextCodec>
+#include <QSet>
 #include <algorithm>
 
 namespace {
@@ -66,6 +67,44 @@ static QString repairDisplayEncoding(const QString &text)
     return mojibakeScore(decoded) < mojibakeScore(text) ? decoded : text;
 }
 
+
+static bool platformTileHasGames(const QString &section, const QString &label)
+{
+    const QVector<KadiaGameInfo> &games = detectedGamesStorage();
+    for (int i = 0; i < games.size(); ++i) {
+        const KadiaGameInfo &game = games.at(i);
+        if (section == QStringLiteral("Arcade")) {
+            if (game.system.compare(QStringLiteral("Arcade"), Qt::CaseInsensitive) != 0)
+                continue;
+            if (label == QStringLiteral("Arcade"))
+                return true;
+            const QString path = QDir::fromNativeSeparators(game.path).toLower();
+            if (label == QStringLiteral("MAME") &&
+                (path.contains(QStringLiteral("/mame/")) || path.contains(QStringLiteral("\\mame\\"))))
+                return true;
+            if (label == QStringLiteral("FBNeo") &&
+                (path.contains(QStringLiteral("/fbneo/")) || path.contains(QStringLiteral("/finalburn"))))
+                return true;
+            // Vertical/lightgun/player-count collections need metadata that is
+            // not currently in RomCatalog. Do not advertise them as populated.
+            continue;
+        }
+        if (game.system.compare(label, Qt::CaseInsensitive) == 0)
+            return true;
+    }
+    return false;
+}
+
+static QString detectedSystemKey()
+{
+    QStringList systems;
+    const QVector<KadiaGameInfo> &games = detectedGamesStorage();
+    for (int i = 0; i < games.size(); ++i)
+        systems << games.at(i).system + QLatin1Char('|') + QDir::fromNativeSeparators(games.at(i).path);
+    systems.sort(Qt::CaseInsensitive);
+    return systems.join(QStringLiteral("\n"));
+}
+
 static bool gameMatchesFilter(const KadiaGameInfo &game, const QString &rawFilter)
 {
     const QString filter = rawFilter.trimmed();
@@ -99,8 +138,17 @@ static bool gameMatchesFilter(const KadiaGameInfo &game, const QString &rawFilte
         return system == QStringLiteral("PlayStation Vita");
     if (filter == QStringLiteral("Game Gear"))
         return system == QStringLiteral("Sega Game Gear");
-    if (filter == QStringLiteral("Arcade") || filter == QStringLiteral("MAME") || filter == QStringLiteral("FBNeo"))
+    if (filter == QStringLiteral("Arcade"))
         return system == QStringLiteral("Arcade");
+    if (filter == QStringLiteral("MAME")) {
+        const QString path = QDir::fromNativeSeparators(game.path).toLower();
+        return system == QStringLiteral("Arcade") && path.contains(QStringLiteral("/mame/"));
+    }
+    if (filter == QStringLiteral("FBNeo")) {
+        const QString path = QDir::fromNativeSeparators(game.path).toLower();
+        return system == QStringLiteral("Arcade") &&
+               (path.contains(QStringLiteral("/fbneo/")) || path.contains(QStringLiteral("/finalburn")));
+    }
     return false;
 }
 }
@@ -558,12 +606,36 @@ const QVector<KadiaSectionInfo> &kadiaSections()
     static QVector<KadiaSectionInfo> filtered;
     static QString lastStoreKey;
     static QString lastUnknownKey;
+    static QString lastSystemKey;
     const QString currentStoreKey = detectedStoresStorage().join(QStringLiteral("|"));
     const QString currentUnknownKey = unknownRomsStorage().join(QStringLiteral("|"));
-    if (filtered.isEmpty() || currentStoreKey != lastStoreKey || currentUnknownKey != lastUnknownKey) {
+    const QString currentSystemKey = detectedSystemKey();
+    if (filtered.isEmpty() || currentStoreKey != lastStoreKey || currentUnknownKey != lastUnknownKey || currentSystemKey != lastSystemKey) {
         filtered = baseData;
         lastStoreKey = currentStoreKey;
         lastUnknownKey = currentUnknownKey;
+        lastSystemKey = currentSystemKey;
+
+        // Console/system catalogs are data-driven. A platform is shown only if
+        // Kadia has at least one recognized game that can actually enter that
+        // catalog. Empty platform sections disappear as well.
+        const QStringList platformSections = QStringList()
+            << QStringLiteral("Consoles") << QStringLiteral("Handhelds")
+            << QStringLiteral("Computers") << QStringLiteral("Arcade");
+        for (int sidx = filtered.size() - 1; sidx >= 0; --sidx) {
+            if (!platformSections.contains(filtered[sidx].name))
+                continue;
+            QVector<KadiaTileInfo> present;
+            const QVector<KadiaTileInfo> original = filtered[sidx].tiles;
+            for (int i = 0; i < original.size(); ++i) {
+                if (platformTileHasGames(filtered[sidx].name, original.at(i).label))
+                    present.push_back(original.at(i));
+            }
+            if (present.isEmpty())
+                filtered.remove(sidx);
+            else
+                filtered[sidx].tiles = present;
+        }
         const QStringList storeLabels = QStringList()
             << QStringLiteral("Steam") << QStringLiteral("Epic") << QStringLiteral("GOG")
             << QStringLiteral("EA") << QStringLiteral("Amazon") << QStringLiteral("Ubisoft")

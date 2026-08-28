@@ -59,7 +59,9 @@ SOURCES += \
     src/ui_model.cpp \
     src/game_stats.cpp \
     src/emulator_manager.cpp \
-    src/kadia_settings.cpp
+    src/kadia_settings.cpp \
+    src/media_library.cpp \
+    src/media_library_dialog.cpp
 
 HEADERS += \
     src/kadia_window.h \
@@ -79,7 +81,9 @@ HEADERS += \
     src/ui_model.h \
     src/game_stats.h \
     src/emulator_manager.h \
-    src/kadia_settings.h
+    src/kadia_settings.h \
+    src/media_library.h \
+    src/media_library_dialog.h
 
 RESOURCES += resources.qrc
 win32:RC_FILE = kadia.rc

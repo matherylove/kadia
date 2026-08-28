@@ -421,6 +421,19 @@ void KadiaScene::update(double dtSeconds)
     m_tileChangeAge += dtSeconds;
     m_gameChangeAge += dtSeconds;
     m_categoryChangeAge += dtSeconds;
+
+    // Sections can disappear after a library refresh when their last game is
+    // removed/reclassified. Keep navigation indices valid immediately.
+    const QVector<KadiaSectionInfo> &sections = kadiaSections();
+    if (!sections.isEmpty()) {
+        m_category = qBound(0, m_category, sections.size() - 1);
+        const int tileCount = sections.at(m_category).tiles.size();
+        m_tile = tileCount > 0 ? qBound(0, m_tile, tileCount - 1) : 0;
+        m_previousTile = tileCount > 0 ? qBound(0, m_previousTile, tileCount - 1) : 0;
+    } else {
+        m_category = m_tile = m_previousTile = 0;
+    }
+
     const double galleryTarget = m_gallery ? 1.0 : 0.0;
     const double speed = qMin(1.0, dtSeconds * 7.5);
     m_galleryBlend += (galleryTarget - m_galleryBlend) * speed;

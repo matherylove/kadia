@@ -67,7 +67,7 @@ The uploaded Sightline project was used as the dependency/toolchain source as re
 - The workflow uses the same **Visual Studio 2017 + v141 XP component** approach and verifies an x86 PE subsystem of **5.1**.
 - The original Sightline workflow is retained as a non-executing reference at `reference/sightline-build-xp.yml`; Kadia's adapted build is `.github/workflows/build-xp.yml`.
 
-FFmpeg is already linked into Kadia and `FfmpegRuntime` probes its version at startup. The visual mockup itself does not decode media yet; the dependency is present so the frontend can add media playback without changing the XP build layout.
+FFmpeg is already linked into Kadia and `FfmpegRuntime` probes its version at startup. Kadia now has the first Windows Media Center-style media-library layer: on-demand background indexing for music, videos/movies, pictures and Recorded TV, configurable media folders, search/browse dialogs and playlist launching through the Windows-associated media player. In-process FFmpeg decoding/playback is the next media-backend phase, so this first layer does not add media decoding work to startup or the D3D render loop.
 
 ## Build locally
 

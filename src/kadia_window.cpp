@@ -8,6 +8,8 @@
 #include "kadia_settings.h"
 #include "emulator_manager.h"
 #include "game_stats.h"
+#include "media_library.h"
+#include "media_library_dialog.h"
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -824,6 +826,65 @@ void KadiaWindow::processSceneCommands()
         return;
     }
 
+    // First functional Windows Media Center layer. Media indexing is strictly
+    // on-demand and runs in MediaLibraryDialog's worker thread, so none of these
+    // features add work to Kadia startup or the D3D render loop.
+    if (section == QStringLiteral("Home") && tile == QStringLiteral("Live TV")) {
+        QMessageBox::information(this, QStringLiteral("Kadia Live TV"),
+                                 QStringLiteral("Live TV and the guide require the tuner/source backend, which is the next Windows Media Center phase. Local media libraries are already enabled."));
+        return;
+    }
+    if ((section == QStringLiteral("Home") && tile == QStringLiteral("Music")) ||
+        (section == QStringLiteral("Music") &&
+         (tile == QStringLiteral("Music Library") || tile == QStringLiteral("Search")))) {
+        MediaLibraryDialog dialog(MediaMusic, this);
+        dialog.exec();
+        return;
+    }
+    if (section == QStringLiteral("Music") && tile == QStringLiteral("Play All")) {
+        MediaLibraryDialog dialog(MediaMusic, this, true);
+        dialog.exec();
+        return;
+    }
+    if (section == QStringLiteral("TV + Movies") && tile == QStringLiteral("Recorded TV")) {
+        MediaLibraryDialog dialog(MediaRecordedTV, this);
+        dialog.exec();
+        return;
+    }
+    if (section == QStringLiteral("TV + Movies") &&
+        (tile == QStringLiteral("Movies") || tile == QStringLiteral("Search"))) {
+        MediaLibraryDialog dialog(MediaVideo, this);
+        dialog.exec();
+        return;
+    }
+    if (section == QStringLiteral("Pictures + Videos") &&
+        (tile == QStringLiteral("Picture Library") || tile == QStringLiteral("Slide Show"))) {
+        MediaLibraryDialog dialog(MediaPicture, this);
+        dialog.exec();
+        return;
+    }
+    if (section == QStringLiteral("Pictures + Videos") &&
+        (tile == QStringLiteral("Video Library") || tile == QStringLiteral("Search"))) {
+        MediaLibraryDialog dialog(tile == QStringLiteral("Search") ? MediaAny : MediaVideo, this);
+        dialog.exec();
+        return;
+    }
+    if (section == QStringLiteral("Pictures + Videos") && tile == QStringLiteral("Play All")) {
+        MediaLibraryDialog dialog(MediaVideo, this, true);
+        dialog.exec();
+        return;
+    }
+    if (section == QStringLiteral("Tasks") && tile == QStringLiteral("Media Libraries")) {
+        MediaLibrarySettingsDialog dialog(this);
+        dialog.exec();
+        return;
+    }
+    if (section == QStringLiteral("Tasks") && tile == QStringLiteral("Media Only")) {
+        MediaLibraryDialog dialog(MediaAny, this);
+        dialog.exec();
+        return;
+    }
+
     // Settings-like tiles are persisted instead of remaining inert. This gives
     // every non-Media-Center configuration tile an immediate, reversible action.
     const bool mediaCenterOnly = section == QStringLiteral("TV + Movies") || section == QStringLiteral("Music") ||
@@ -832,7 +893,7 @@ void KadiaWindow::processSceneCommands()
                                  section == QStringLiteral("Tasks");
     if (mediaCenterOnly) {
         QMessageBox::information(this, QStringLiteral("Windows Media Center feature"),
-                                 QStringLiteral("%1 is intentionally left to the Windows Media Center/media backend.").arg(tile));
+                                 QStringLiteral("%1 belongs to the next Media Center backend phase. Music, local video/movie, picture, recorded-TV libraries and Media Libraries setup are now functional.").arg(tile));
         return;
     }
 
