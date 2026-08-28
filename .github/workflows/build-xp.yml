@@ -96,6 +96,14 @@ jobs:
           $process = Start-Process -FilePath $bootstrapper -ArgumentList $arguments -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "VS 2017 Build Tools installer failed: $($process.ExitCode)" }
 
+      - name: Refresh authentic console logos
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m pip install --disable-pip-version-check --quiet pillow
+          python tools\sync-console-logos.py --min-success 34
+
       - name: Generate Makefile
         shell: cmd
         run: |
