@@ -1678,10 +1678,20 @@ void KadiaScene::drawTileIcon(QPainter &p, const QRectF &rect, const QString &ic
     if (!brandResource.isEmpty()) {
         const QImage *brand = rawArgbIcon(brandResource);
         if (brand && !brand->isNull()) {
-            const qreal side = qMin(rect.width() * 0.52, rect.height() * 0.62) * (1.0 + 0.08 * selection);
-            QRectF target(center.x() - side * 0.5, center.y() - side * 0.5, side, side);
+            // Real platform packs contain both compact emblems and wide wordmarks.
+            // Fit the native aspect ratio instead of forcing every asset into a
+            // square (which made authentic NES/N64/etc. marks look tiny or warped).
+            const qreal maxW = rect.width() * 0.68 * (1.0 + 0.08 * selection);
+            const qreal maxH = rect.height() * 0.64 * (1.0 + 0.08 * selection);
+            const qreal imageW = qMax(1, brand->width());
+            const qreal imageH = qMax(1, brand->height());
+            const qreal fit = qMin(maxW / imageW, maxH / imageH);
+            const qreal drawW = imageW * fit;
+            const qreal drawH = imageH * fit;
+            QRectF target(center.x() - drawW * 0.5, center.y() - drawH * 0.5, drawW, drawH);
             p.save();
             p.setOpacity(0.82 + 0.18 * selection);
+            p.setRenderHint(QPainter::SmoothPixmapTransform, true);
             p.drawImage(target, *brand, QRectF(brand->rect()));
             p.restore();
             p.restore();

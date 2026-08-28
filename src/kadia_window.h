@@ -20,6 +20,7 @@ class RomScanner;
 class RomScanProgressDialog;
 class LibretroMetadataWorker;
 class LibretroMetadataProgressDialog;
+namespace DesktopCapture { class WallpaperCaptureThread; }
 
 class KadiaWindow : public QWidget
 {
@@ -72,7 +73,6 @@ private:
     QTimer m_timer;
     QTimer m_emulatorFullscreenTimer;
     QElapsedTimer m_clock;
-    QElapsedTimer m_desktopCaptureClock;
     bool m_rendererAttempted;
     bool m_closing;
     bool m_monitorMode;
@@ -93,8 +93,10 @@ private:
     bool m_romScanCancelled;
     bool m_postStartupChecksCompleted;
     bool m_liveDesktopBackground;
+    DesktopCapture::WallpaperCaptureThread *m_wallpaperCapture;
     qint64 m_activeEmulatorPid;
     int m_fullscreenEnforceAttempts;
+    QString m_activeEmulatorExecutable;
     QString m_activeGamePath;
     QDateTime m_activeGameStarted;
 };

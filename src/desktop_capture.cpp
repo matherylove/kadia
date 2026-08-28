@@ -2,7 +2,9 @@
 
 #include <QImage>
 #include <QHash>
+#include <QElapsedTimer>
 #include <QList>
+#include <QMutexLocker>
 #include <QString>
 #include <QtGlobal>
 
@@ -17,14 +19,100 @@ namespace {
 static HWND g_cachedWallpaperWindow = 0;
 static DWORD g_lastWallpaperProbe = 0;
 static QImage g_lastGoodWallpaperFrame;
+static bool g_lastCaptureUsedPrint = false;
+static DWORD g_lastPrintStatePrune = 0;
 
 struct PrintCaptureState
 {
     int method;       // -1 unknown, -2 all print methods failed, 0..3 flags, 4 WM_PRINT
     DWORD lastProbe;
-    PrintCaptureState() : method(-1), lastProbe(0) {}
+    int directState;  // -1 unknown, 0 direct GDI failed, 1 direct GDI works
+    DWORD lastDirectProbe;
+
+    // PrintWindow must render at the source client's native size. Recreating a
+    // multi-megapixel DIB section every sample caused heavy allocation churn
+    // and could progressively starve Wallpaper Engine. Keep one scratch surface
+    // per renderer HWND and reuse it until that renderer changes size.
+    HDC printDc;
+    HBITMAP printBitmap;
+    HGDIOBJ printOldBitmap;
+    void *printBits;
+    int printWidth;
+    int printHeight;
+
+    PrintCaptureState()
+        : method(-1), lastProbe(0), directState(-1), lastDirectProbe(0),
+          printDc(0), printBitmap(0), printOldBitmap(0), printBits(0),
+          printWidth(0), printHeight(0) {}
 };
 static QHash<quintptr, PrintCaptureState> g_printCaptureStates;
+
+static void releasePrintSurface(PrintCaptureState &state)
+{
+    if (state.printDc && state.printBitmap) {
+        if (state.printOldBitmap)
+            SelectObject(state.printDc, state.printOldBitmap);
+        DeleteObject(state.printBitmap);
+    }
+    if (state.printDc)
+        DeleteDC(state.printDc);
+    state.printDc = 0;
+    state.printBitmap = 0;
+    state.printOldBitmap = 0;
+    state.printBits = 0;
+    state.printWidth = 0;
+    state.printHeight = 0;
+}
+
+static bool ensurePrintSurface(PrintCaptureState &state, int width, int height)
+{
+    if (state.printDc && state.printBitmap && state.printBits &&
+        state.printWidth == width && state.printHeight == height)
+        return true;
+
+    releasePrintSurface(state);
+    state.printDc = CreateCompatibleDC(0);
+    if (!state.printDc)
+        return false;
+
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    state.printBitmap = CreateDIBSection(state.printDc, &bmi, DIB_RGB_COLORS,
+                                          &state.printBits, 0, 0);
+    if (!state.printBitmap || !state.printBits) {
+        releasePrintSurface(state);
+        return false;
+    }
+    state.printOldBitmap = SelectObject(state.printDc, state.printBitmap);
+    state.printWidth = width;
+    state.printHeight = height;
+    return true;
+}
+
+static void prunePrintCaptureStates()
+{
+    const DWORD now = GetTickCount();
+    if (g_lastPrintStatePrune != 0 &&
+        static_cast<DWORD>(now - g_lastPrintStatePrune) < 10000u)
+        return;
+    g_lastPrintStatePrune = now;
+
+    const QList<quintptr> keys = g_printCaptureStates.keys();
+    for (int i = 0; i < keys.size(); ++i) {
+        HWND hwnd = reinterpret_cast<HWND>(keys.at(i));
+        if (hwnd && IsWindow(hwnd))
+            continue;
+        PrintCaptureState state = g_printCaptureStates.take(keys.at(i));
+        releasePrintSurface(state);
+    }
+}
 
 static qint64 intersectionArea(const RECT &a, const RECT &b)
 {
@@ -293,12 +381,15 @@ static bool cachedWindowCovers(const QRect &screenRect)
 
 static HWND wallpaperWindowForRect(const QRect &screenRect)
 {
+    prunePrintCaptureStates();
     const bool cachedUsable = cachedWindowCovers(screenRect);
     const DWORD now = GetTickCount();
 
     // Re-probe occasionally so starting/stopping Wallpaper Engine while Kadia
-    // is open is reflected without walking the process list every frame.
-    if (!cachedUsable || static_cast<DWORD>(now - g_lastWallpaperProbe) >= 1500u) {
+    // is open is reflected without walking the process list every frame. Four
+    // seconds is fast enough for discovery and avoids repeated Toolhelp/EnumWindows
+    // scans competing with the wallpaper renderer itself.
+    if (!cachedUsable || static_cast<DWORD>(now - g_lastWallpaperProbe) >= 4000u) {
         g_lastWallpaperProbe = now;
 
         // Prefer Wallpaper Engine's renderer itself. This is the animated
@@ -371,40 +462,11 @@ static QImage captureWindowWithPrint(HWND hwnd, const QRect &screenRect, const Q
     if (!ClientToScreen(hwnd, &origin))
         return QImage();
 
-    HWND referenceWindow = hwnd;
-    HDC referenceDc = GetDC(referenceWindow);
-    if (!referenceDc) {
-        referenceWindow = 0;
-        referenceDc = GetDC(0);
-    }
-    if (!referenceDc)
+    PrintCaptureState &state = g_printCaptureStates[reinterpret_cast<quintptr>(hwnd)];
+    if (!ensurePrintSurface(state, clientWidth, clientHeight))
         return QImage();
-
-    HDC memoryDc = CreateCompatibleDC(referenceDc);
-    if (!memoryDc) {
-        ReleaseDC(referenceWindow, referenceDc);
-        return QImage();
-    }
-
-    BITMAPINFO bmi;
-    ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = clientWidth;
-    bmi.bmiHeader.biHeight = -clientHeight;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void *bits = 0;
-    HBITMAP bitmap = CreateDIBSection(memoryDc, &bmi, DIB_RGB_COLORS, &bits, 0, 0);
-    if (!bitmap || !bits) {
-        if (bitmap) DeleteObject(bitmap);
-        DeleteDC(memoryDc);
-        ReleaseDC(referenceWindow, referenceDc);
-        return QImage();
-    }
-
-    HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
+    HDC memoryDc = state.printDc;
+    void *bits = state.printBits;
 
 #ifndef PW_RENDERFULLCONTENT
 #  define PW_RENDERFULLCONTENT 0x00000002
@@ -422,7 +484,7 @@ static QImage captureWindowWithPrint(HWND hwnd, const QRect &screenRect, const Q
                        clientWidth * 4, QImage::Format_RGB32);
         QImage region = wrapped.copy(clipped);
         if (region.size() != outputSize)
-            region = region.scaled(outputSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            region = region.scaled(outputSize, Qt::IgnoreAspectRatio, Qt::FastTransformation);
         return imageHasUsefulPixels(region) ? region : QImage();
     };
 
@@ -436,7 +498,6 @@ static QImage captureWindowWithPrint(HWND hwnd, const QRect &screenRect, const Q
         0u
     };
 
-    PrintCaptureState &state = g_printCaptureStates[reinterpret_cast<quintptr>(hwnd)];
     const DWORD now = GetTickCount();
 
     auto tryPrintFlag = [&](int method) -> QImage {
@@ -457,7 +518,7 @@ static QImage captureWindowWithPrint(HWND hwnd, const QRect &screenRect, const Q
     };
 
     // Once a renderer has demonstrated which path works, use only that path on
-    // the 60 Hz hot loop. If all print paths are black, back off for 750 ms
+    // the capture-thread hot loop. If all print paths are black, back off for 750 ms
     // before probing again instead of issuing four expensive cross-process paint
     // requests every frame.
     if (state.method >= 0 && state.method <= 3) {
@@ -490,10 +551,6 @@ static QImage captureWindowWithPrint(HWND hwnd, const QRect &screenRect, const Q
         }
     }
 
-    SelectObject(memoryDc, oldBitmap);
-    DeleteObject(bitmap);
-    DeleteDC(memoryDc);
-    ReleaseDC(referenceWindow, referenceDc);
     return result;
 }
 
@@ -536,8 +593,7 @@ static QImage captureWindowRegion(HWND hwnd, const QRect &screenRect, const QSiz
     }
 
     HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
-    SetStretchBltMode(memoryDc, HALFTONE);
-    SetBrushOrgEx(memoryDc, 0, 0, 0);
+    SetStretchBltMode(memoryDc, COLORONCOLOR);
     PatBlt(memoryDc, 0, 0, outputSize.width(), outputSize.height(), BLACKNESS);
     const BOOL ok = StretchBlt(memoryDc,
                                0, 0, outputSize.width(), outputSize.height(),
@@ -556,6 +612,44 @@ static QImage captureWindowRegion(HWND hwnd, const QRect &screenRect, const QSiz
     DeleteDC(memoryDc);
     ReleaseDC(hwnd, sourceDc);
     return result;
+}
+
+static QImage captureWallpaperWindow(HWND hwnd, const QRect &screenRect, const QSize &outputSize)
+{
+    if (!hwnd || !IsWindow(hwnd))
+        return QImage();
+
+    PrintCaptureState &state = g_printCaptureStates[reinterpret_cast<quintptr>(hwnd)];
+    const DWORD now = GetTickCount();
+
+    // GetDC/StretchBlt does not ask the target application to repaint.  When a
+    // wallpaper host exposes its composed surface through GDI this is dramatically
+    // cheaper than PrintWindow and, importantly, does not stall Wallpaper Engine's
+    // render thread.  Probe again occasionally because renderer backends can change
+    // when Wallpaper Engine switches scenes.
+    const bool probeDirect = state.directState == 1 || state.directState == -1 ||
+                             state.lastDirectProbe == 0 ||
+                             static_cast<DWORD>(now - state.lastDirectProbe) >= 3000u;
+    if (probeDirect) {
+        QImage direct = captureWindowRegion(hwnd, screenRect, outputSize);
+        if (imageHasUsefulPixels(direct)) {
+            state.directState = 1;
+            state.lastDirectProbe = now;
+            return direct;
+        }
+        state.directState = 0;
+        state.lastDirectProbe = now;
+    }
+
+    // GPU/DirectComposition wallpaper windows may not expose useful pixels via
+    // GetDC.  Keep PrintWindow as the compatibility path, but only after the
+    // non-invasive capture backend has been ruled out for this HWND.
+    g_lastCaptureUsedPrint = true;
+    QImage printed = captureWindowWithPrint(hwnd, screenRect, outputSize);
+    if (!printed.isNull())
+        return printed;
+
+    return QImage();
 }
 
 } // namespace
@@ -596,17 +690,14 @@ QImage capture(const QRect &screenRect, const QSize &outputSize)
     if (screenRect.isEmpty() || outputSize.isEmpty())
         return QImage();
 
+    g_lastCaptureUsedPrint = false;
+
     // wallpaperWindowForRect() is deliberately cached. Walking every process,
     // top-level window and child window at 60 Hz caused more work than the UI
-    // renderer itself on large libraries. Re-probe only on its 1.5 s cadence.
+    // renderer itself on large libraries. Re-probe only on its multi-second cadence.
     const HWND primary = wallpaperWindowForRect(screenRect);
     if (primary) {
-        QImage frame = captureWindowWithPrint(primary, screenRect, outputSize);
-        if (frame.isNull()) {
-            frame = captureWindowRegion(primary, screenRect, outputSize);
-            if (!imageHasUsefulPixels(frame))
-                frame = QImage();
-        }
+        const QImage frame = captureWallpaperWindow(primary, screenRect, outputSize);
         if (!frame.isNull()) {
             g_lastGoodWallpaperFrame = frame;
             return frame;
@@ -625,12 +716,7 @@ QImage capture(const QRect &screenRect, const QSize &outputSize)
         fallbacks.append(generic);
 
     for (int i = 0; i < fallbacks.size(); ++i) {
-        QImage frame = captureWindowWithPrint(fallbacks.at(i), screenRect, outputSize);
-        if (frame.isNull()) {
-            frame = captureWindowRegion(fallbacks.at(i), screenRect, outputSize);
-            if (!imageHasUsefulPixels(frame))
-                frame = QImage();
-        }
+        const QImage frame = captureWallpaperWindow(fallbacks.at(i), screenRect, outputSize);
         if (!frame.isNull()) {
             g_lastGoodWallpaperFrame = frame;
             g_cachedWallpaperWindow = fallbacks.at(i);
@@ -646,7 +732,7 @@ QImage capture(const QRect &screenRect, const QSize &outputSize)
     if (!g_lastGoodWallpaperFrame.isNull()) {
         if (g_lastGoodWallpaperFrame.size() == outputSize)
             return g_lastGoodWallpaperFrame;
-        return g_lastGoodWallpaperFrame.scaled(outputSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        return g_lastGoodWallpaperFrame.scaled(outputSize, Qt::IgnoreAspectRatio, Qt::FastTransformation);
     }
     return QImage();
 #else
@@ -654,6 +740,126 @@ QImage capture(const QRect &screenRect, const QSize &outputSize)
     Q_UNUSED(outputSize);
     return QImage();
 #endif
+}
+
+
+
+WallpaperCaptureThread::WallpaperCaptureThread(QObject *parent)
+    : QThread(parent)
+    , m_captureHz(30)
+    , m_enabled(false)
+    , m_stopping(false)
+    , m_producedSerial(0)
+    , m_consumedSerial(0)
+{
+}
+
+WallpaperCaptureThread::~WallpaperCaptureThread()
+{
+    stop();
+}
+
+void WallpaperCaptureThread::setEnabled(bool enabled)
+{
+    QMutexLocker lock(&m_mutex);
+    if (m_enabled == enabled)
+        return;
+    m_enabled = enabled;
+    m_wake.wakeAll();
+}
+
+void WallpaperCaptureThread::setTarget(const QRect &screenRect, const QSize &outputSize, int captureHz)
+{
+    const int boundedHz = qBound(1, captureHz, 60);
+    QMutexLocker lock(&m_mutex);
+    if (m_screenRect == screenRect && m_outputSize == outputSize && m_captureHz == boundedHz)
+        return;
+    m_screenRect = screenRect;
+    m_outputSize = outputSize;
+    m_captureHz = boundedHz;
+    m_wake.wakeAll();
+}
+
+bool WallpaperCaptureThread::takeLatest(QImage *frameOut)
+{
+    if (!frameOut)
+        return false;
+    QMutexLocker lock(&m_mutex);
+    if (m_latest.isNull() || m_consumedSerial == m_producedSerial)
+        return false;
+    *frameOut = m_latest; // QImage is implicitly shared; this is O(1).
+    m_consumedSerial = m_producedSerial;
+    return true;
+}
+
+void WallpaperCaptureThread::stop()
+{
+    {
+        QMutexLocker lock(&m_mutex);
+        if (m_stopping && !isRunning())
+            return;
+        m_stopping = true;
+        m_enabled = false;
+        m_wake.wakeAll();
+    }
+    if (isRunning())
+        wait();
+}
+
+void WallpaperCaptureThread::run()
+{
+    for (;;) {
+        QRect screenRect;
+        QSize outputSize;
+        int captureHz = 30;
+        {
+            QMutexLocker lock(&m_mutex);
+            while (!m_stopping && (!m_enabled || m_screenRect.isEmpty() || m_outputSize.isEmpty()))
+                m_wake.wait(&m_mutex, 250);
+            if (m_stopping)
+                break;
+            screenRect = m_screenRect;
+            outputSize = m_outputSize;
+            captureHz = qBound(1, m_captureHz, 60);
+        }
+
+        // This may take tens of milliseconds for a GPU-backed Wallpaper Engine
+        // window. That latency is intentionally isolated here and never blocks
+        // frameTick(), input polling, animation updates or D3D Present().  If the
+        // compatibility PrintWindow backend is expensive, automatically reduce
+        // the sampling pressure instead of repeatedly forcing Wallpaper Engine to
+        // paint faster than it can render.
+        QElapsedTimer captureCost;
+        captureCost.start();
+        const QImage frame = DesktopCapture::capture(screenRect, outputSize);
+        const qint64 costMs = captureCost.elapsed();
+        if (!frame.isNull()) {
+            QMutexLocker lock(&m_mutex);
+            if (!m_stopping && m_enabled) {
+                m_latest = frame;
+                ++m_producedSerial;
+            }
+        }
+
+        int effectiveHz = captureHz;
+        // PrintWindow asks the foreign renderer to paint. Even when one call is
+        // individually fast, driving it at 30/60 Hz can steal enough render time
+        // to make Wallpaper Engine progressively stutter. Cap that compatibility
+        // backend at 12 samples/s; Kadia's own UI remains at monitor refresh and
+        // simply reuses the newest wallpaper frame between samples.
+        if (g_lastCaptureUsedPrint)
+            effectiveHz = qMin(effectiveHz, 12);
+        if (costMs >= 28)
+            effectiveHz = qMin(effectiveHz, 10);
+        else if (costMs >= 14)
+            effectiveHz = qMin(effectiveHz, 16);
+        const qint64 targetPeriod = qMax<qint64>(1, 1000 / qMax(1, effectiveHz));
+        const unsigned long delayMs = static_cast<unsigned long>(qMax<qint64>(1, targetPeriod - costMs));
+        QMutexLocker lock(&m_mutex);
+        if (m_stopping)
+            break;
+        m_wake.wait(&m_mutex, delayMs);
+    }
 }
 
 } // namespace DesktopCapture

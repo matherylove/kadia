@@ -234,8 +234,68 @@ static QStringList launchArguments(const QString &emulator, const QString &syste
         return args << absoluteRomPath << QStringLiteral("--fullscreen=true");
     if (exe == QStringLiteral("mame.exe") || exe == QStringLiteral("mame64.exe"))
         return args << QStringLiteral("-nowindow") << absoluteRomPath;
+    if (exe == QStringLiteral("fbneo.exe"))
+        // Classic Win32 FBNeo already enters fullscreen for command-line game
+        // launches, while SDL builds expose a different command-line surface.
+        // Passing a frontend-specific switch to an unknown FBNeo build can be
+        // interpreted as content, so launch the ROM normally and use FBNeo's
+        // native Alt+Enter binding only if its renderer remains windowed.
+        return args << absoluteRomPath;
+    if (exe == QStringLiteral("mesen.exe") || exe == QStringLiteral("mesen2.exe"))
+        return args << QStringLiteral("--fullscreen") << absoluteRomPath;
+    if (exe == QStringLiteral("ares.exe"))
+        return args << QStringLiteral("--fullscreen") << QStringLiteral("--no-file-prompt")
+                    << absoluteRomPath;
+    if (exe == QStringLiteral("stella.exe"))
+        return args << QStringLiteral("-fullscreen") << QStringLiteral("1") << absoluteRomPath;
+    if (exe == QStringLiteral("mednafen.exe"))
+        // Mednafen exposes global settings directly as -<setting> <value>.
+        return args << QStringLiteral("-video.fs") << QStringLiteral("1") << absoluteRomPath;
+    if (exe == QStringLiteral("kega-fusion.exe") || exe == QStringLiteral("fusion.exe"))
+        return args << absoluteRomPath << QStringLiteral("-fullscreen");
+    if (exe == QStringLiteral("altirra.exe") || exe == QStringLiteral("altirra64.exe"))
+        return args << QStringLiteral("/f") << absoluteRomPath;
+    if (exe == QStringLiteral("x64sc.exe") || exe == QStringLiteral("x64.exe"))
+        return args << QStringLiteral("-VICIIfull") << absoluteRomPath;
+    if (exe == QStringLiteral("dosbox-staging.exe") || exe == QStringLiteral("dosbox.exe"))
+        return args << QStringLiteral("-fullscreen") << absoluteRomPath;
+    if (exe == QStringLiteral("openmsx.exe"))
+        // openMSX has a native Alt+Enter fullscreen binding but no simple
+        // one-shot fullscreen CLI flag. Launch media normally; the staged native
+        // hotkey fallback below performs the transition after the renderer exists.
+        return args << absoluteRomPath;
+    if (exe == QStringLiteral("flycast.exe"))
+        // Flycast's current command line accepts transient configuration values.
+        // This asks its own window backend for fullscreen without persisting the
+        // user's emu.cfg setting.
+        return args << QStringLiteral("-config") << QStringLiteral("window:fullscreen=yes")
+                    << absoluteRomPath;
     if (exe == QStringLiteral("project64.exe"))
-        return args << QStringLiteral("/fullscreen") << absoluteRomPath;
+        // Project64's own default fullscreen shortcut is Alt+Enter.  There is no
+        // stable command-line fullscreen switch across the 2.x/3.x Windows
+        // builds, so launch the ROM normally and let Kadia request the emulator's
+        // native fullscreen action once the real game window exists.
+        return args << absoluteRomPath;
+    if (exe == QStringLiteral("nestopiaue.exe"))
+        // Nestopia UE exposes -f/--fullscreen in its current command-line shell.
+        return args << QStringLiteral("-f") << absoluteRomPath;
+    if (exe == QStringLiteral("nestopia.exe"))
+        // The classic Win32 Nestopia shell uses its configuration-key syntax on
+        // the command line rather than the GNU-style --fullscreen switch.  This
+        // is equivalent to Preferences > "Switch to fullscreen on startup"
+        // without permanently editing the user's configuration by hand.
+        return args << absoluteRomPath
+                    << QStringLiteral("-preferences")
+                    << QStringLiteral("fullscreen")
+                    << QStringLiteral("on")
+                    << QStringLiteral("start")
+                    << QStringLiteral(":")
+                    << QStringLiteral("yes")
+                    << QStringLiteral("-view")
+                    << QStringLiteral("size")
+                    << QStringLiteral("fullscreen")
+                    << QStringLiteral(":")
+                    << QStringLiteral("stretched");
     if (exe == QStringLiteral("redream.exe"))
         return args << QStringLiteral("--fullscreen") << absoluteRomPath;
 
@@ -421,6 +481,48 @@ static QList<DWORD> processTree(DWORD rootPid)
     return ordered;
 }
 
+static QList<DWORD> processesMatchingExecutable(const QString &emulatorExecutable)
+{
+    QList<DWORD> result;
+    const QString exeName = QFileInfo(emulatorExecutable).fileName();
+    if (exeName.isEmpty() || emulatorExecutable == QString::fromLatin1(kShellAssociation))
+        return result;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return result;
+
+    PROCESSENTRY32W entry;
+    ZeroMemory(&entry, sizeof(entry));
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (QString::fromWCharArray(entry.szExeFile).compare(exeName, Qt::CaseInsensitive) == 0)
+                result.append(entry.th32ProcessID);
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return result;
+}
+
+static QList<DWORD> launchProcessCandidates(DWORD rootPid, const QString &emulatorExecutable)
+{
+    QList<DWORD> result = processTree(rootPid);
+
+    // Portable frontends and a few emulator packages bootstrap a second process
+    // and let the original PID exit.  In that case the child can be re-parented
+    // before Kadia's first 200 ms probe, so a pure parent/child walk loses the
+    // real renderer.  Merge processes with the exact selected executable name as
+    // a recovery path.  This is especially important for Project64/Nestopia
+    // bundles distributed through emulator packs.
+    const QList<DWORD> named = processesMatchingExecutable(emulatorExecutable);
+    for (int i = 0; i < named.size(); ++i) {
+        if (!result.contains(named.at(i)))
+            result.append(named.at(i));
+    }
+    return result;
+}
+
 struct EmulatorWindowSearch
 {
     QList<DWORD> pids;
@@ -456,6 +558,10 @@ static BOOL CALLBACK emulatorWindowCandidate(HWND hwnd, LPARAM param)
         return TRUE;
 
     qint64 score = area;
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == hwnd || (foreground && IsChild(hwnd, foreground)) ||
+        (foreground && IsChild(foreground, hwnd)))
+        score += area * 4;
     if (_wcsicmp(className, L"#32770") == 0) {
         if (w < 800 || h < 600)
             return TRUE;
@@ -469,10 +575,10 @@ static BOOL CALLBACK emulatorWindowCandidate(HWND hwnd, LPARAM param)
     return TRUE;
 }
 
-static HWND bestEmulatorWindow(DWORD rootPid)
+static HWND bestEmulatorWindow(DWORD rootPid, const QString &emulatorExecutable)
 {
     EmulatorWindowSearch search;
-    search.pids = processTree(rootPid);
+    search.pids = launchProcessCandidates(rootPid, emulatorExecutable);
     if (search.pids.isEmpty())
         return 0;
     EnumWindows(emulatorWindowCandidate, reinterpret_cast<LPARAM>(&search));
@@ -483,50 +589,178 @@ static bool windowCoversMonitor(HWND hwnd)
 {
     if (!hwnd || !IsWindow(hwnd))
         return false;
+
     HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi;
     ZeroMemory(&mi, sizeof(mi));
     mi.cbSize = sizeof(mi);
+    if (!monitor || !GetMonitorInfoW(monitor, &mi))
+        return false;
+
+    // Measure the renderer/client area, not the decorated outer HWND. A maximized
+    // window can have an outer rect matching the monitor while its client still
+    // leaves borders/titlebar visible, which previously made Kadia think a
+    // windowed emulator was already fullscreen.
+    RECT cr;
+    ZeroMemory(&cr, sizeof(cr));
+    if (!GetClientRect(hwnd, &cr))
+        return false;
+    POINT tl = { cr.left, cr.top };
+    POINT br = { cr.right, cr.bottom };
+    if (!ClientToScreen(hwnd, &tl) || !ClientToScreen(hwnd, &br))
+        return false;
+
+    const int tolerance = 6;
+    const bool clientCovers =
+        qAbs(tl.x - mi.rcMonitor.left) <= tolerance &&
+        qAbs(tl.y - mi.rcMonitor.top) <= tolerance &&
+        qAbs(br.x - mi.rcMonitor.right) <= tolerance &&
+        qAbs(br.y - mi.rcMonitor.bottom) <= tolerance;
+    if (clientCovers)
+        return true;
+
+    // Exclusive/borderless render windows do not always expose a client rect
+    // equal to the monitor even though the top-level renderer is already in
+    // fullscreen.  Accept an outer monitor-sized popup only when normal window
+    // decorations are gone; this still rejects an ordinary maximized window.
     RECT wr;
     ZeroMemory(&wr, sizeof(wr));
-    if (!monitor || !GetMonitorInfoW(monitor, &mi) || !GetWindowRect(hwnd, &wr))
+    if (!GetWindowRect(hwnd, &wr))
         return false;
-    return qAbs(wr.left - mi.rcMonitor.left) <= 3 &&
-           qAbs(wr.top - mi.rcMonitor.top) <= 3 &&
-           qAbs(wr.right - mi.rcMonitor.right) <= 3 &&
-           qAbs(wr.bottom - mi.rcMonitor.bottom) <= 3;
+    const bool outerCovers =
+        qAbs(wr.left - mi.rcMonitor.left) <= tolerance &&
+        qAbs(wr.top - mi.rcMonitor.top) <= tolerance &&
+        qAbs(wr.right - mi.rcMonitor.right) <= tolerance &&
+        qAbs(wr.bottom - mi.rcMonitor.bottom) <= tolerance;
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const bool decorated = (style & WS_CAPTION) != 0 || (style & WS_THICKFRAME) != 0;
+    return outerCovers && !decorated;
 }
 
-static bool postFullscreenShortcut(HWND hwnd, bool f11)
+static bool focusEmulatorWindow(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+        return false;
+    if (IsIconic(hwnd))
+        ShowWindow(hwnd, SW_RESTORE);
+
+    const DWORD targetThread = GetWindowThreadProcessId(hwnd, 0);
+    const DWORD currentThread = GetCurrentThreadId();
+    const bool attached = targetThread && targetThread != currentThread &&
+                          AttachThreadInput(currentThread, targetThread, TRUE) != FALSE;
+
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    SetActiveWindow(hwnd);
+    SetFocus(hwnd);
+
+    if (attached)
+        AttachThreadInput(currentThread, targetThread, FALSE);
+    return GetForegroundWindow() == hwnd || IsChild(hwnd, GetForegroundWindow());
+}
+
+static bool sendAltEnter(HWND hwnd)
 {
     if (!hwnd || !IsWindow(hwnd))
         return false;
 
-    if (IsIconic(hwnd))
-        ShowWindow(hwnd, SW_RESTORE);
+    focusEmulatorWindow(hwnd);
+    Sleep(25);
 
-    if (f11) {
-        // F11 is the other common emulator-owned fullscreen toggle. Sending it
-        // to the emulator (instead of rewriting its HWND styles) means the
-        // emulator itself remains responsible for entering *and leaving* the
-        // mode later.
-        const UINT scan = MapVirtualKeyW(VK_F11, MAPVK_VK_TO_VSC);
-        const LPARAM down = 1 | (static_cast<LPARAM>(scan) << 16);
-        const LPARAM up = down | (1u << 30) | (1u << 31);
-        PostMessageW(hwnd, WM_KEYDOWN, VK_F11, down);
-        PostMessageW(hwnd, WM_KEYUP, VK_F11, up);
+    INPUT input[4];
+    ZeroMemory(input, sizeof(input));
+    input[0].type = INPUT_KEYBOARD;
+    input[0].ki.wVk = VK_MENU;
+    input[1].type = INPUT_KEYBOARD;
+    input[1].ki.wVk = VK_RETURN;
+    input[2].type = INPUT_KEYBOARD;
+    input[2].ki.wVk = VK_RETURN;
+    input[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    input[3].type = INPUT_KEYBOARD;
+    input[3].ki.wVk = VK_MENU;
+    input[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    if (SendInput(4, input, sizeof(INPUT)) == 4)
         return true;
-    }
 
-    // Alt+Enter is preferred because most emulators implement it as a native,
-    // fully reversible fullscreen toggle.  Bit 29 marks the ALT context for a
-    // WM_SYSKEY message.
-    const UINT scan = MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC);
-    const LPARAM down = 1 | (static_cast<LPARAM>(scan) << 16) | (1u << 29);
-    const LPARAM up = down | (1u << 30) | (1u << 31);
-    PostMessageW(hwnd, WM_SYSKEYDOWN, VK_RETURN, down);
-    PostMessageW(hwnd, WM_SYSKEYUP, VK_RETURN, up);
-    return true;
+    // Very old shells can reject injected global input while still accepting
+    // the equivalent system-key messages in their own queue.  Keep this as a
+    // secondary path only; the preferred path above remains a real Alt+Enter.
+    const LPARAM down = static_cast<LPARAM>(1u | (1u << 29));
+    const LPARAM up = static_cast<LPARAM>(1u | (1u << 29) | (1u << 30) | (1u << 31));
+    const BOOL a = PostMessageW(hwnd, WM_SYSKEYDOWN, VK_RETURN, down);
+    const BOOL b = PostMessageW(hwnd, WM_SYSKEYUP, VK_RETURN, up);
+    return a != FALSE && b != FALSE;
+}
+
+enum FullscreenHotkey
+{
+    FullscreenHotkeyNone = 0,
+    FullscreenHotkeyAltEnter,
+    FullscreenHotkeyF11
+};
+
+static FullscreenHotkey emulatorFullscreenHotkey(const QString &emulatorExecutable)
+{
+    const QString exe = QFileInfo(emulatorExecutable).fileName().toLower();
+    if (exe.isEmpty() || emulatorExecutable == QString::fromLatin1(kShellAssociation))
+        return FullscreenHotkeyAltEnter;
+
+    // Use only hotkeys that are native to the corresponding emulator. This is
+    // intentionally not a generic "try F11 then Alt+Enter" routine: doing that
+    // can trigger unrelated emulator actions and was the source of earlier
+    // fullscreen regressions. Native CLI options always get first chance.
+    if (exe == QStringLiteral("mesen.exe") || exe == QStringLiteral("mesen2.exe") ||
+        exe == QStringLiteral("flycast.exe"))
+        return FullscreenHotkeyF11;
+
+    if (exe == QStringLiteral("project64.exe") ||
+        exe == QStringLiteral("nestopia.exe") ||
+        exe == QStringLiteral("nestopiaue.exe") ||
+        exe == QStringLiteral("openmsx.exe") ||
+        exe == QStringLiteral("stella.exe") ||
+        exe == QStringLiteral("fbneo.exe") ||
+        exe == QStringLiteral("dosbox.exe") ||
+        exe == QStringLiteral("dosbox-staging.exe") ||
+        exe.contains(QStringLiteral("duckstation")) ||
+        exe.startsWith(QStringLiteral("pcsx2")) ||
+        exe.startsWith(QStringLiteral("ppsspp")) ||
+        exe.startsWith(QStringLiteral("snes9x")) ||
+        exe.startsWith(QStringLiteral("dolphin")) ||
+        exe == QStringLiteral("cemu.exe") ||
+        exe == QStringLiteral("redream.exe") ||
+        exe == QStringLiteral("mgba.exe") ||
+        exe == QStringLiteral("melonds.exe") ||
+        exe.contains(QStringLiteral("citra")) ||
+        exe.contains(QStringLiteral("lime3ds")) ||
+        exe == QStringLiteral("xemu.exe") ||
+        exe.startsWith(QStringLiteral("xenia")))
+        return FullscreenHotkeyAltEnter;
+
+    return FullscreenHotkeyNone;
+}
+
+static bool sendFunctionKey(HWND hwnd, WORD key)
+{
+    if (!hwnd || !IsWindow(hwnd))
+        return false;
+    focusEmulatorWindow(hwnd);
+    Sleep(25);
+
+    INPUT input[2];
+    ZeroMemory(input, sizeof(input));
+    input[0].type = INPUT_KEYBOARD;
+    input[0].ki.wVk = key;
+    input[1].type = INPUT_KEYBOARD;
+    input[1].ki.wVk = key;
+    input[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    if (SendInput(2, input, sizeof(INPUT)) == 2)
+        return true;
+
+    const LPARAM down = static_cast<LPARAM>(1u);
+    const LPARAM up = static_cast<LPARAM>(1u | (1u << 30) | (1u << 31));
+    const BOOL a = PostMessageW(hwnd, WM_KEYDOWN, key, down);
+    const BOOL b = PostMessageW(hwnd, WM_KEYUP, key, up);
+    return a != FALSE && b != FALSE;
 }
 
 static bool maximizeEmulatorWindow(HWND hwnd)
@@ -677,10 +911,12 @@ bool EmulatorManager::configureEmulators(QWidget *parent)
 }
 
 bool EmulatorManager::launch(const QString &system, const QString &romPath, QWidget *parent,
-                             qint64 *processIdOut)
+                             qint64 *processIdOut, QString *emulatorExecutableOut)
 {
     if (processIdOut)
         *processIdOut = 0;
+    if (emulatorExecutableOut)
+        emulatorExecutableOut->clear();
 
     const QFileInfo romInfo(romPath);
     if (!romInfo.exists()) {
@@ -740,32 +976,50 @@ bool EmulatorManager::launch(const QString &system, const QString &romPath, QWid
 
     if (processIdOut)
         *processIdOut = launchedPid;
+    if (emulatorExecutableOut)
+        *emulatorExecutableOut = emulator;
     GameStats::recordLaunch(romPath);
     return true;
 }
 
-bool EmulatorManager::enforceFullscreen(qint64 processId, int stage)
+bool EmulatorManager::enforceFullscreen(qint64 processId, const QString &emulatorExecutable, int stage)
 {
 #ifdef Q_OS_WIN
     if (processId <= 0)
         return false;
-    HWND hwnd = bestEmulatorWindow(static_cast<DWORD>(processId));
+    HWND hwnd = bestEmulatorWindow(static_cast<DWORD>(processId), emulatorExecutable);
     if (!hwnd)
         return false;
     if (windowCoversMonitor(hwnd))
         return true;
 
-    if (stage <= 0) {
-        postFullscreenShortcut(hwnd, false);
-        return false; // let the emulator process the toggle before re-checking
+    // Do not use a universal F11 or mutate window styles. F11 means unrelated
+    // actions in several emulators, while style rewriting caused the small
+    // renderer-in-a-corner bug. A focused Alt+Enter is reversible and is the
+    // emulator-specific native path after its CLI options had time to work. Stage
+    // 1 is a second attempt in case stage 0 landed on a transient
+    // launcher window which was replaced by the real renderer.
+    if (stage <= 1) {
+        const FullscreenHotkey hotkey = emulatorFullscreenHotkey(emulatorExecutable);
+        if (hotkey == FullscreenHotkeyAltEnter) {
+            sendAltEnter(hwnd);
+            return false;
+        }
+        if (hotkey == FullscreenHotkeyF11) {
+            sendFunctionKey(hwnd, VK_F11);
+            return false;
+        }
     }
-    if (stage == 1) {
-        postFullscreenShortcut(hwnd, true);
-        return false;
-    }
-    return maximizeEmulatorWindow(hwnd);
+
+    // Final compatibility fallback is ordinary Windows maximization only. It
+    // never strips WS_CAPTION/WS_THICKFRAME or changes a child renderer size, so
+    // the emulator can always Restore or toggle its own fullscreen later.
+    if (stage >= 2)
+        return maximizeEmulatorWindow(hwnd);
+    return false;
 #else
     Q_UNUSED(processId);
+    Q_UNUSED(emulatorExecutable);
     Q_UNUSED(stage);
     return false;
 #endif
@@ -790,6 +1044,30 @@ bool EmulatorManager::isProcessTreeRunning(qint64 processId)
     return false;
 #else
     Q_UNUSED(processId);
+    return false;
+#endif
+}
+
+bool EmulatorManager::isLaunchRunning(qint64 processId, const QString &emulatorExecutable)
+{
+#ifdef Q_OS_WIN
+    if (processId <= 0)
+        return false;
+    const QList<DWORD> pids = launchProcessCandidates(static_cast<DWORD>(processId), emulatorExecutable);
+    for (int i = 0; i < pids.size(); ++i) {
+        HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, pids.at(i));
+        if (!process)
+            continue;
+        DWORD exitCode = 0;
+        const bool running = GetExitCodeProcess(process, &exitCode) && exitCode == STILL_ACTIVE;
+        CloseHandle(process);
+        if (running)
+            return true;
+    }
+    return false;
+#else
+    Q_UNUSED(processId);
+    Q_UNUSED(emulatorExecutable);
     return false;
 #endif
 }

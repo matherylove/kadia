@@ -14,6 +14,7 @@ required = [
     'src/game_stats.cpp', 'src/emulator_manager.cpp', 'src/kadia_settings.cpp',
     'assets/kadia_logo.argb',
     '.github/workflows/build-xp.yml',
+    'tools/sync-console-logos.py',
     'third_party/ffmpeg/include/libavutil/avutil.h',
     'third_party/ffmpeg/lib/avutil.lib',
     'third_party/ffmpeg/avutil-59.dll',
@@ -40,7 +41,8 @@ if cpp.count('QStringLiteral(') < 800:
     errors.append('ui_model.cpp appears unexpectedly small')
 
 workflow = (root / '.github/workflows/build-xp.yml').read_text(encoding='utf-8')
-for needle in ['Qt-5.6.3-Static-XP.7z', 'Kadia.pro', 'Kadia.exe', 'Microsoft.VisualStudio.Component.WinXP']:
+for needle in ['Qt-5.6.3-Static-XP.7z', 'Kadia.pro', 'Kadia.exe', 'Microsoft.VisualStudio.Component.WinXP',
+               'sync-console-logos.py']:
     if needle not in workflow:
         errors.append(f'workflow missing expected token: {needle}')
 
@@ -63,6 +65,25 @@ for needle in ['setViewportSize', 'drawTileIcon', 'hoverAt', 'maxTrail']:
 for needle in ['ToggleGallery', 'CycleSort', 'LaunchSelectedGame', 'drawGallery']:
     if needle not in scene and needle not in window:
         errors.append(f'gallery implementation missing expected token: {needle}')
+
+
+emulator = (root / 'src/emulator_manager.cpp').read_text(encoding='utf-8')
+for needle in ['FullscreenHotkey', 'window:fullscreen=yes', '-video.fs', '-VICIIfull',
+               'project64.exe', 'nestopia.exe']:
+    if needle not in emulator:
+        errors.append(f'emulator fullscreen implementation missing expected token: {needle}')
+
+desktop = (root / 'src/desktop_capture.cpp').read_text(encoding='utf-8')
+for needle in ['ensurePrintSurface', 'releasePrintSurface', 'g_lastCaptureUsedPrint',
+               'prunePrintCaptureStates']:
+    if needle not in desktop:
+        errors.append(f'desktop capture optimization missing expected token: {needle}')
+
+logo_sync = (root / 'tools/sync-console-logos.py').read_text(encoding='utf-8')
+for needle in ['PRO100BYTE/console-logos', '1de47931607ddf83cbc982d776b68e6cc3864ad7',
+               'Image.Resampling.LANCZOS', 'GITHUB_TOKEN', 'premultiplied-ARGB']:
+    if needle not in logo_sync:
+        errors.append(f'console logo sync missing expected token: {needle}')
 
 for rel in [
     'assets/console_icons/playstation.argb',
