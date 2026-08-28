@@ -101,7 +101,7 @@ void MediaLibraryDialog::beginScan()
     m_status->setText(QStringLiteral("Scanning configured %1 folders in the background...").arg(MediaLibrary::kindLabel(m_kind).toLower()));
     m_scan = new MediaLibraryScanThread(m_kind, this);
     connect(m_scan, SIGNAL(finished()), this, SLOT(scanFinished()));
-    m_scan->start(QThread::LowPriority);
+    m_scan->start(QThread::LowestPriority);
 }
 
 void MediaLibraryDialog::scanFinished()
@@ -123,6 +123,12 @@ void MediaLibraryDialog::scanFinished()
 void MediaLibraryDialog::rebuildList()
 {
     const QString filter = m_search->text().trimmed();
+
+    // QListWidget can otherwise repaint and emit selection notifications for
+    // every inserted row. Large music/video libraries would momentarily steal
+    // the GUI thread even though the filesystem scan itself is asynchronous.
+    m_list->setUpdatesEnabled(false);
+    m_list->blockSignals(true);
     m_list->clear();
     for (int i = 0; i < m_items.size(); ++i) {
         const KadiaMediaItem &item = m_items.at(i);
@@ -134,6 +140,9 @@ void MediaLibraryDialog::rebuildList()
         row->setData(Qt::UserRole, item.path);
         row->setToolTip(item.path);
     }
+    m_list->blockSignals(false);
+    m_list->setUpdatesEnabled(true);
+    m_list->viewport()->update();
     selectionChanged();
 }
 

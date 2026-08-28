@@ -33,6 +33,11 @@ int &gameLibraryRevisionStorage()
     static int revision = 0;
     return revision;
 }
+int &sectionModelRevisionStorage()
+{
+    static int revision = 0;
+    return revision;
+}
 KadiaGameSort &gameSortStorage()
 {
     static KadiaGameSort sort = SortAlphabetical;
@@ -68,41 +73,34 @@ static QString repairDisplayEncoding(const QString &text)
 }
 
 
-static bool platformTileHasGames(const QString &section, const QString &label)
+static QSet<QString> populatedPlatformLabels()
 {
+    QSet<QString> labels;
     const QVector<KadiaGameInfo> &games = detectedGamesStorage();
     for (int i = 0; i < games.size(); ++i) {
         const KadiaGameInfo &game = games.at(i);
-        if (section == QStringLiteral("Arcade")) {
-            if (game.system.compare(QStringLiteral("Arcade"), Qt::CaseInsensitive) != 0)
-                continue;
-            if (label == QStringLiteral("Arcade"))
-                return true;
-            const QString path = QDir::fromNativeSeparators(game.path).toLower();
-            if (label == QStringLiteral("MAME") &&
-                (path.contains(QStringLiteral("/mame/")) || path.contains(QStringLiteral("\\mame\\"))))
-                return true;
-            if (label == QStringLiteral("FBNeo") &&
-                (path.contains(QStringLiteral("/fbneo/")) || path.contains(QStringLiteral("/finalburn"))))
-                return true;
-            // Vertical/lightgun/player-count collections need metadata that is
-            // not currently in RomCatalog. Do not advertise them as populated.
+        const QString systemKey = game.system.trimmed().toLower();
+        if (!systemKey.isEmpty())
+            labels.insert(systemKey);
+
+        if (game.system.compare(QStringLiteral("Arcade"), Qt::CaseInsensitive) != 0)
             continue;
-        }
-        if (game.system.compare(label, Qt::CaseInsensitive) == 0)
-            return true;
+
+        // MAME/FBNeo are catalog subsets. Determine those labels once per
+        // library revision instead of repeatedly normalizing paths from every
+        // render-time section query.
+        const QString path = QDir::fromNativeSeparators(game.path).toLower();
+        if (path.contains(QStringLiteral("/mame/")))
+            labels.insert(QStringLiteral("mame"));
+        if (path.contains(QStringLiteral("/fbneo/")) || path.contains(QStringLiteral("/finalburn")))
+            labels.insert(QStringLiteral("fbneo"));
     }
-    return false;
+    return labels;
 }
 
-static QString detectedSystemKey()
+static bool platformTileHasGames(const QSet<QString> &populated, const QString &label)
 {
-    QStringList systems;
-    const QVector<KadiaGameInfo> &games = detectedGamesStorage();
-    for (int i = 0; i < games.size(); ++i)
-        systems << games.at(i).system + QLatin1Char('|') + QDir::fromNativeSeparators(games.at(i).path);
-    systems.sort(Qt::CaseInsensitive);
-    return systems.join(QStringLiteral("\n"));
+    return populated.contains(label.trimmed().toLower());
 }
 
 static bool gameMatchesFilter(const KadiaGameInfo &game, const QString &rawFilter)
@@ -158,7 +156,10 @@ void setKadiaDetectedStores(const QStringList &stores)
     QStringList clean = stores;
     clean.removeDuplicates();
     clean.sort(Qt::CaseInsensitive);
-    detectedStoresStorage() = clean;
+    if (detectedStoresStorage() != clean) {
+        detectedStoresStorage() = clean;
+        ++sectionModelRevisionStorage();
+    }
 }
 
 QStringList kadiaDetectedStores()
@@ -171,7 +172,10 @@ void setKadiaUnknownRoms(const QStringList &paths)
     QStringList clean = paths;
     clean.removeDuplicates();
     clean.sort(Qt::CaseInsensitive);
-    unknownRomsStorage() = clean;
+    if (unknownRomsStorage() != clean) {
+        unknownRomsStorage() = clean;
+        ++sectionModelRevisionStorage();
+    }
 }
 
 static bool buildKadiaGameFromRecord(const RomCatalogRecord &record, KadiaGameInfo *out)
@@ -233,8 +237,10 @@ void updateKadiaGameFromPath(const QString &path)
     RomCatalogRecord record;
     KadiaGameInfo game;
     if (!RomCatalog::recordForPath(path, &record) || !buildKadiaGameFromRecord(record, &game)) {
-        if (existing >= 0)
+        if (existing >= 0) {
             games.remove(existing);
+            ++sectionModelRevisionStorage();
+        }
         ++gameLibraryRevisionStorage();
         return;
     }
@@ -251,6 +257,7 @@ void updateKadiaGameFromPath(const QString &path)
         return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
     });
     ++gameLibraryRevisionStorage();
+    ++sectionModelRevisionStorage();
 }
 
 void refreshKadiaGameLibrary()
@@ -278,6 +285,7 @@ void refreshKadiaGameLibrary()
 
     detectedGamesStorage().swap(rebuilt);
     ++gameLibraryRevisionStorage();
+    ++sectionModelRevisionStorage();
 }
 
 void setKadiaActiveGameFilter(const QString &filter)
@@ -604,17 +612,11 @@ const QVector<KadiaSectionInfo> &kadiaSections()
     };
 
     static QVector<KadiaSectionInfo> filtered;
-    static QString lastStoreKey;
-    static QString lastUnknownKey;
-    static QString lastSystemKey;
-    const QString currentStoreKey = detectedStoresStorage().join(QStringLiteral("|"));
-    const QString currentUnknownKey = unknownRomsStorage().join(QStringLiteral("|"));
-    const QString currentSystemKey = detectedSystemKey();
-    if (filtered.isEmpty() || currentStoreKey != lastStoreKey || currentUnknownKey != lastUnknownKey || currentSystemKey != lastSystemKey) {
+    static int lastSectionRevision = -1;
+    const int currentSectionRevision = sectionModelRevisionStorage();
+    if (filtered.isEmpty() || currentSectionRevision != lastSectionRevision) {
         filtered = baseData;
-        lastStoreKey = currentStoreKey;
-        lastUnknownKey = currentUnknownKey;
-        lastSystemKey = currentSystemKey;
+        lastSectionRevision = currentSectionRevision;
 
         // Console/system catalogs are data-driven. A platform is shown only if
         // Kadia has at least one recognized game that can actually enter that
@@ -622,13 +624,14 @@ const QVector<KadiaSectionInfo> &kadiaSections()
         const QStringList platformSections = QStringList()
             << QStringLiteral("Consoles") << QStringLiteral("Handhelds")
             << QStringLiteral("Computers") << QStringLiteral("Arcade");
+        const QSet<QString> populatedPlatforms = populatedPlatformLabels();
         for (int sidx = filtered.size() - 1; sidx >= 0; --sidx) {
             if (!platformSections.contains(filtered[sidx].name))
                 continue;
             QVector<KadiaTileInfo> present;
             const QVector<KadiaTileInfo> original = filtered[sidx].tiles;
             for (int i = 0; i < original.size(); ++i) {
-                if (platformTileHasGames(filtered[sidx].name, original.at(i).label))
+                if (platformTileHasGames(populatedPlatforms, original.at(i).label))
                     present.push_back(original.at(i));
             }
             if (present.isEmpty())

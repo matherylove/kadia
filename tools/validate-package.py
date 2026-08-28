@@ -50,9 +50,14 @@ for needle in ['QDirIterator::Subdirectories', 'media/musicFolders', 'MediaRecor
 for needle in ['MediaLibraryScanThread', 'Scanning configured', 'MediaLibrarySettingsDialog']:
     if needle not in media_dialog:
         errors.append(f'media browser implementation missing expected token: {needle}')
-for needle in ['platformTileHasGames', 'currentSystemKey', 'platformSections']:
+for needle in ['platformTileHasGames', 'sectionModelRevisionStorage', 'platformSections']:
     if needle not in cpp:
         errors.append(f'empty-platform catalog filtering missing expected token: {needle}')
+
+if 'detectedSystemKey' in cpp:
+    errors.append('ui_model.cpp still rebuilds/sorts a full game-system key in the GUI hot path')
+if 'LowestPriority' not in media_dialog:
+    errors.append('media scanner should run at QThread::LowestPriority')
 
 workflow = (root / '.github/workflows/build-xp.yml').read_text(encoding='utf-8')
 for needle in ['Qt-5.6.3-Static-XP.7z', 'Kadia.pro', 'Kadia.exe', 'Microsoft.VisualStudio.Component.WinXP',
